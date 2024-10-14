@@ -133,6 +133,11 @@ func (t *TaskExecution) WriteToFile(cfg *Config, df *iop.Dataflow) (cnt uint64, 
 func (t *TaskExecution) WriteToDb(cfg *Config, df *iop.Dataflow, tgtConn database.Connection) (cnt uint64, err error) {
 	defer t.PBar.Finish()
 
+	// Force SLING_PROCESS_BW to false for Proton
+	if tgtConn.GetType() == dbio.TypeDbProton {
+		os.Setenv("SLING_PROCESS_BW", "false")
+	}
+
 	// detect empty
 	if len(df.Columns) == 0 {
 		err = g.Error("no stream columns detected")
