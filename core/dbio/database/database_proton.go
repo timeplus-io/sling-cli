@@ -456,15 +456,32 @@ func processProtonInsertRow(columns iop.Columns, row []any) []any {
 
 // GetCount returns count of records
 func (conn *ProtonConn) GetCount(tableFName string) (uint64, error) {
-	// wait for a while before getting count, otherwise newly added row can be 0
-	time.Sleep(countWaitDuration)
-	sql := fmt.Sprintf(`select count(*) as cnt from table(%s)`, tableFName)
-	data, err := conn.Self().Query(sql)
-	if err != nil {
-		g.LogError(err, "could not get row number")
-		return 0, err
+	var count uint64
+
+	// Retry logic to handle occasional zero count, likely due to database latency or transactional delays.
+	// Temporary workaround while investigating the root cause.
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		sql := fmt.Sprintf(`select count(*) as cnt from table(%s)`, tableFName)
+		data, err := conn.Self().Query(sql)
+		if err != nil {
+			g.LogError(err, "could not get row number")
+			return 0, err
+		}
+
+		count = cast.ToUint64(data.Rows[0][0])
+		if count > 0 {
+			return count, nil
+		}
+
+		if attempt < maxRetries-1 {
+			g.Debug("Got zero count for %s, retrying in %v (attempt %d/%d)",
+				tableFName, countWaitDuration, attempt+1, maxRetries)
+			time.Sleep(countWaitDuration)
+		}
 	}
-	return cast.ToUint64(data.Rows[0][0]), nil
+
+	// Return 0 after max retries if no valid count is obtained
+	return count, nil
 }
 
 func (conn *ProtonConn) GetNativeType(col iop.Column) (nativeType string, err error) {
