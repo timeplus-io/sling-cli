@@ -481,5 +481,10 @@ func (conn *ProtonConn) GetNativeType(col iop.Column) (nativeType string, err er
 		return "datetime64(3, 'UTC') DEFAULT now64(3, 'UTC') CODEC(DoubleDelta, LZ4)", nil
 	}
 
+	// special case for _tp_sn, Column _tp_sn is reserved, expected type is non-nullable int64
+	if col.Name == "_tp_sn" {
+		return "int64 CODEC(Delta(8), ZSTD(1))", nil
+	}
+
 	return nativeType, err
 }
