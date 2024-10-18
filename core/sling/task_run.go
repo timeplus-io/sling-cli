@@ -4,9 +4,11 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"os/signal"
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"syscall"
 	"time"
 
 	_ "net/http/pprof"
@@ -358,6 +360,30 @@ func (t *TaskExecution) runFileToDB() (err error) {
 		t.AddCleanupTaskLast(func() { tgtConn.Close() })
 	}
 
+	if t.Config.Target.Type == dbio.TypeDbProton && t.Config.Mode == IncrementalMode {
+		t.Config.Target.Object = setSchema(cast.ToString(t.Config.Target.Data["schema"]), t.Config.Target.Object)
+
+		targetTable, err := database.ParseTableName(t.Config.Target.Object, tgtConn.GetType())
+		if err != nil {
+			return g.Error(err, "could not parse target table")
+		}
+
+		existed, err := database.TableExists(tgtConn, targetTable.FullName())
+		if err != nil {
+			return g.Error(err, "could not check if final table exists in incremental mode")
+		}
+		if !existed {
+			err = g.Error("final table %s not found in incremental mode, please create table %s first", t.Config.Target.Object, t.Config.Target.Object)
+			return err
+		}
+
+		if targetTable.Columns, err = tgtConn.GetSQLColumns(targetTable); err != nil {
+			return g.Error(err, "could not get table columns, when write to timeplusd database in incremental mode, final table %s need created first", targetTable.FullName())
+		}
+
+		t.Config.Target.Columns = targetTable.Columns
+	}
+
 	// check if table exists by getting target columns
 	// only pull if ignore_existing is specified (don't need columns yet otherwise)
 	if t.Config.IgnoreExisting() {
@@ -609,9 +635,29 @@ func (t *TaskExecution) createIntermediateConfig() *Config {
 }
 
 func (t *TaskExecution) runProtonToProton(srcConn, tgtConn database.Connection) (err error) {
+	if t.Config.Target.Type == dbio.TypeDbProton && t.Config.Mode == IncrementalMode {
+		existed, err := database.TableExists(tgtConn, t.Config.Target.Object)
+		if err != nil {
+			return g.Error(err, "could not check if final table exists in incremental mode")
+		}
+		if !existed {
+			err = g.Error("final table %s not found in incremental mode, please create table %s first", t.Config.Target.Object, t.Config.Target.Object)
+			return err
+		}
+	}
+
 	start := time.Now()
 	maxRetries := 3
 	retryDelay := time.Second * 5
+
+	// Set up interrupt handling
+	interruptChan := make(chan os.Signal, 1)
+	signal.Notify(interruptChan, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(interruptChan)
+
+	// Create a context that can be cancelled
+	ctx, cancel := context.WithCancel(t.Context.Ctx)
+	defer cancel()
 
 	// Step 1: Create intermediate config
 	t.SetProgress("Creating intermediate configuration")
@@ -620,14 +666,55 @@ func (t *TaskExecution) runProtonToProton(srcConn, tgtConn database.Connection) 
 		err = g.Error("Failed to create intermediate config")
 		return
 	}
-	defer os.Remove(intermediateConfig.Target.Object) // Clean up the temp file
+
+	cleanup := func() {
+		if intermediateConfig != nil && intermediateConfig.Target.Object != "" {
+			os.Remove(intermediateConfig.Target.Object)
+		}
+	}
+	defer cleanup()
+
+	// Function to handle interrupts
+	go func() {
+		select {
+		case <-interruptChan:
+			t.SetProgress("Interrupt received, cleaning up and exiting")
+			cancel()
+			cleanup()
+			os.Exit(1)
+		case <-ctx.Done():
+			return
+		}
+	}()
+
+	// Retry function with cleanup
+	retryWithCleanup := func(operation func() error) error {
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+				err := operation()
+				if err == nil {
+					return nil
+				}
+				if attempt == maxRetries {
+					return err
+				}
+				t.SetProgress("Attempt %d failed, retrying in %v", attempt, retryDelay)
+				cleanup()
+				time.Sleep(retryDelay)
+			}
+		}
+		return g.Error("Max retries reached")
+	}
 
 	// Step 2: Run DbToFile with retries
 	t.SetProgress("Exporting data from source Proton database")
 	// t.PBar.Start()
 	originalConfig := t.Config
 	t.Config = intermediateConfig
-	err = retry(maxRetries, retryDelay, func() error {
+	err = retryWithCleanup(func() error {
 		return t.runDbToFile()
 	})
 	t.Config = originalConfig // Restore original config
@@ -671,6 +758,7 @@ func (t *TaskExecution) runProtonToProton(srcConn, tgtConn database.Connection) 
 	t.Config.SrcConn = intermediateConfig.TgtConn
 
 	t.SetProgress("Importing data to target Proton database")
+
 	err = retry(maxRetries, retryDelay, func() error {
 		return t.runFileToDB()
 	})
@@ -691,18 +779,14 @@ func (t *TaskExecution) runProtonToProton(srcConn, tgtConn database.Connection) 
 }
 
 func retry(attempts int, sleep time.Duration, f func() error) (err error) {
-	for i := 0; ; i++ {
-		err = f()
-		if err == nil {
-			return
+	for i := 0; i < attempts; i++ {
+		if err = f(); err == nil {
+			return nil
 		}
-
-		if i >= (attempts - 1) {
-			break
+		if i < attempts-1 {
+			time.Sleep(sleep)
+			g.Debug("Retrying after error: %v", err)
 		}
-
-		time.Sleep(sleep)
-		g.Debug("Retrying after error: %v", err)
 	}
 	return err
 }

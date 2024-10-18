@@ -150,10 +150,8 @@ func retry(attempts int, sleep time.Duration, f func() error) (err error) {
 			return nil
 		}
 
-		g.Error("Attempt %d failed: %v", i+1, err)
-
 		if i < attempts-1 { // don't sleep after the last attempt
-			g.Info("Sleeping for %v before next attempt", sleep)
+			g.Info("Sleeping for %v before next attempt, error: %v", sleep, err)
 			time.Sleep(sleep)
 		}
 	}
@@ -253,18 +251,58 @@ func (conn *ProtonConn) processBatch(tableFName string, table Table, batch *iop.
 
 	decimalCols := []int{}
 	intCols := []int{}
+	int8Cols := []int{}
+	int16Cols := []int{}
+	int32Cols := []int{}
 	int64Cols := []int{}
+	uint8Cols := []int{}
+	uint16Cols := []int{}
+	uint32Cols := []int{}
+	uint64Cols := []int{}
+	float32Cols := []int{}
+	float64Cols := []int{}
 	floatCols := []int{}
+
 	for i, col := range batch.Columns {
-		switch {
-		case col.Type == iop.DecimalType:
-			decimalCols = append(decimalCols, i)
-		case col.Type == iop.SmallIntType:
-			intCols = append(intCols, i)
-		case col.Type.IsInteger():
+		dbType := strings.ToLower(col.DbType)
+		if strings.HasPrefix(dbType, "nullable(") {
+			dbType = strings.TrimPrefix(dbType, "nullable(")
+			dbType = strings.TrimSuffix(dbType, ")")
+		}
+
+		switch dbType {
+		case "int8":
+			int8Cols = append(int8Cols, i)
+		case "int16":
+			int16Cols = append(int16Cols, i)
+		case "int32":
+			int32Cols = append(int32Cols, i)
+		case "int64":
 			int64Cols = append(int64Cols, i)
-		case col.Type == iop.FloatType:
-			floatCols = append(floatCols, i)
+		case "uint8":
+			uint8Cols = append(uint8Cols, i)
+		case "uint16":
+			uint16Cols = append(uint16Cols, i)
+		case "uint32":
+			uint32Cols = append(uint32Cols, i)
+		case "uint64":
+			uint64Cols = append(uint64Cols, i)
+		case "float32":
+			float32Cols = append(float32Cols, i)
+		case "float64":
+			float64Cols = append(float64Cols, i)
+		default:
+			// Fall back to col.Type if DbType is not recognized
+			switch {
+			case col.Type == iop.DecimalType:
+				decimalCols = append(decimalCols, i)
+			case col.Type == iop.SmallIntType:
+				intCols = append(intCols, i)
+			case col.Type.IsInteger():
+				int64Cols = append(int64Cols, i)
+			case col.Type == iop.FloatType:
+				floatCols = append(floatCols, i)
+			}
 		}
 	}
 
@@ -280,6 +318,27 @@ func (conn *ProtonConn) processBatch(tableFName string, table Table, batch *iop.
 				if err == nil {
 					row[colI] = val
 				}
+				eG.Capture(err)
+			}
+		}
+
+		for _, colI := range int8Cols {
+			if row[colI] != nil {
+				row[colI], err = cast.ToInt8E(row[colI])
+				eG.Capture(err)
+			}
+		}
+
+		for _, colI := range int16Cols {
+			if row[colI] != nil {
+				row[colI], err = cast.ToInt16E(row[colI])
+				eG.Capture(err)
+			}
+		}
+
+		for _, colI := range int32Cols {
+			if row[colI] != nil {
+				row[colI], err = cast.ToInt32E(row[colI])
 				eG.Capture(err)
 			}
 		}
@@ -300,8 +359,52 @@ func (conn *ProtonConn) processBatch(tableFName string, table Table, batch *iop.
 			}
 		}
 
+		for _, colI := range uint8Cols {
+			if row[colI] != nil {
+				row[colI], err = cast.ToUint8E(row[colI])
+				eG.Capture(err)
+			}
+		}
+
+		for _, colI := range uint16Cols {
+			if row[colI] != nil {
+				row[colI], err = cast.ToUint16E(row[colI])
+				eG.Capture(err)
+			}
+		}
+
+		// set Int32 correctly
+		for _, colI := range uint32Cols {
+			if row[colI] != nil {
+				row[colI], err = cast.ToUint32E(row[colI])
+				eG.Capture(err)
+			}
+		}
+
+		// set Int64 correctly
+		for _, colI := range uint64Cols {
+			if row[colI] != nil {
+				row[colI], err = cast.ToUint64E(row[colI])
+				eG.Capture(err)
+			}
+		}
+
 		// set Float64 correctly
 		for _, colI := range floatCols {
+			if row[colI] != nil {
+				row[colI], err = cast.ToFloat64E(row[colI])
+				eG.Capture(err)
+			}
+		}
+
+		for _, colI := range float32Cols {
+			if row[colI] != nil {
+				row[colI], err = cast.ToFloat32E(row[colI])
+				eG.Capture(err)
+			}
+		}
+
+		for _, colI := range float64Cols {
 			if row[colI] != nil {
 				row[colI], err = cast.ToFloat64E(row[colI])
 				eG.Capture(err)
