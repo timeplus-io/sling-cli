@@ -359,6 +359,30 @@ func (t *TaskExecution) runFileToDB() (err error) {
 		t.AddCleanupTaskLast(func() { tgtConn.Close() })
 	}
 
+	if t.Config.Target.Type == dbio.TypeDbProton && t.Config.Mode == IncrementalMode {
+		t.Config.Target.Object = setSchema(cast.ToString(t.Config.Target.Data["schema"]), t.Config.Target.Object)
+
+		targetTable, err := database.ParseTableName(t.Config.Target.Object, tgtConn.GetType())
+		if err != nil {
+			return g.Error(err, "could not parse target table")
+		}
+
+		existed, err := database.TableExists(tgtConn, targetTable.FullName())
+		if err != nil {
+			return g.Error(err, "could not check if final table exists in incremental mode")
+		}
+		if !existed {
+			err = g.Error("final table %s not found in incremental mode, please create table %s first", t.Config.Target.Object, t.Config.Target.Object)
+			return err
+		}
+
+		if targetTable.Columns, err = tgtConn.GetSQLColumns(targetTable); err != nil {
+			return g.Error(err, "could not get table columns, when write to timeplusd database in incremental mode, final table %s need created first", targetTable.FullName())
+		}
+
+		t.Config.Target.Columns = targetTable.Columns
+	}
+
 	// check if table exists by getting target columns
 	// only pull if ignore_existing is specified (don't need columns yet otherwise)
 	if t.Config.IgnoreExisting() {
@@ -615,6 +639,17 @@ func (t *TaskExecution) createIntermediateConfig() *Config {
 }
 
 func (t *TaskExecution) runProtonToProton(srcConn, tgtConn database.Connection) (err error) {
+	if t.Config.Target.Type == dbio.TypeDbProton && t.Config.Mode == IncrementalMode {
+		existed, err := database.TableExists(tgtConn, t.Config.Target.Object)
+		if err != nil {
+			return g.Error(err, "could not check if final table exists in incremental mode")
+		}
+		if !existed {
+			err = g.Error("final table %s not found in incremental mode, please create table %s first", t.Config.Target.Object, t.Config.Target.Object)
+			return err
+		}
+	}
+
 	start := time.Now()
 	maxRetries := 3
 	retryDelay := time.Second * 5
