@@ -276,7 +276,7 @@ func (t *TaskExecution) WriteToDb(cfg *Config, df *iop.Dataflow, tgtConn databas
 	}()
 
 	cfg.Target.TmpTableCreated = true
-	if tgtConn.GetType() != dbio.TypeDbProton {
+	if !(cfg.Target.Type == dbio.TypeDbProton && cfg.Mode == IncrementalMode) {
 		df.Columns = sampleData.Columns
 	}
 	setStage("4 - load-into-temp")
