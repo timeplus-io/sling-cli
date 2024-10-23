@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"strings"
@@ -599,6 +600,43 @@ func (t *TaskExecution) runDbToDb() (err error) {
 	return
 }
 
+func CreateTempFile(fileName string) (*os.File, error) {
+	// First try /app directory
+	appFolder := "/app"
+
+	// Check if /app exists and we have write permissions
+	if info, err := os.Stat(appFolder); err == nil && info.IsDir() {
+		// Try to create a test file to verify write permissions
+		testPath := filepath.Join(appFolder, ".write_test")
+		if testFile, err := os.Create(testPath); err == nil {
+			testFile.Close()
+			os.Remove(testPath) // Clean up test file
+
+			// /app exists and is writable, create file there
+			tempFilePath := filepath.Join(appFolder, fileName)
+			if file, err := os.Create(tempFilePath); err == nil {
+				return file, nil
+			} else {
+				return nil, g.Error("failed to create file in /app: %v", err)
+			}
+		}
+	}
+
+	// Fallback to current directory
+	localFolder := "sling_transfer"
+	if err := os.MkdirAll(localFolder, 0755); err != nil {
+		return nil, g.Error("failed to create local directory: %v", err)
+	}
+
+	tempFilePath := filepath.Join(localFolder, fileName)
+	file, err := os.Create(tempFilePath)
+	if err != nil {
+		return nil, g.Error("failed to create file in local directory: %v", err)
+	}
+
+	return file, nil
+}
+
 func (t *TaskExecution) createIntermediateConfig() *Config {
 	intermediateConfig := *t.Config // Create a copy of the original config
 
@@ -606,10 +644,12 @@ func (t *TaskExecution) createIntermediateConfig() *Config {
 	timestamp := time.Now().Format("20060102_150405")
 	sourceTable := t.Config.Source.Stream
 	targetTable := t.Config.Target.Object
-	tempFileName := fmt.Sprintf("proton_%s_%s_to_%s.csv", timestamp, sourceTable, targetTable)
-	tempFile, err := os.CreateTemp("", tempFileName)
+	tempFileName := fmt.Sprintf("timeplus_database_%s_%s_to_%s.csv", timestamp, sourceTable, targetTable)
+
+	// Create or overwrite the file (this is an intermediate file, no need to check if it exists)
+	tempFile, err := CreateTempFile(tempFileName)
 	if err != nil {
-		g.Error(err, "Could not create temporary file")
+		g.Error(err, "Could not create temporary file '%s' when transferring from %s to %s", tempFileName, t.Config.Source.Stream, t.Config.Target.Object)
 		return nil
 	}
 
