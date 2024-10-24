@@ -364,27 +364,22 @@ func (t *TaskExecution) WriteToDb(cfg *Config, df *iop.Dataflow, tgtConn databas
 func (t *TaskExecution) writeDirectly(cfg *Config, df *iop.Dataflow, tgtConn database.Connection) (cnt uint64, err error) {
 	defer t.PBar.Finish()
 
+	// writing directly does not support incremental/backfill with a primary key
+	// (which requires a merge/upsert). We can only insert.
+	if g.In(cfg.Mode, IncrementalMode, BackfillMode) && len(cfg.Source.PrimaryKey()) > 0 {
+		return 0, g.Error("mode '%s' with a primary-key is not supported for direct write.", cfg.Mode)
+	}
+
 	// detect empty
 	if len(df.Columns) == 0 {
 		err = g.Error("no stream columns detected")
 		return
 	}
 
-	targetTable, err := database.ParseTableName(cfg.Target.Object, tgtConn.GetType())
+	// Initialize target table
+	targetTable, err := initializeTargetTable(cfg, tgtConn)
 	if err != nil {
-		return 0, g.Error(err, "could not parse object table name")
-	}
-
-	if cfg.Target.Options.TableDDL != nil {
-		targetTable.DDL = *cfg.Target.Options.TableDDL
-	}
-	targetTable.DDL = g.R(targetTable.DDL, "object_name", targetTable.Raw, "table", targetTable.Raw)
-	targetTable.SetKeys(cfg.Source.PrimaryKey(), cfg.Source.UpdateKey, cfg.Target.Options.TableKeys)
-
-	// check table ddl
-	if targetTable.DDL != "" && !strings.Contains(targetTable.DDL, targetTable.Raw) {
-		err = g.Error("The Table DDL provided needs to contains the exact object table name: %s\nProvided:\n%s", targetTable.Raw, targetTable.DDL)
-		return
+		return 0, err
 	}
 
 	// Execute pre-SQL
@@ -392,13 +387,9 @@ func (t *TaskExecution) writeDirectly(cfg *Config, df *iop.Dataflow, tgtConn dat
 		return 0, err
 	}
 
-	setStage("4 - prepare-temp")
-
-	// create schema if not exist
-	_, err = createSchemaIfNotExists(tgtConn, targetTable.Schema)
-	if err != nil {
-		err = g.Error(err, "Error checking & creating schema "+targetTable.Schema)
-		return
+	// Ensure schema exists
+	if err := ensureSchemaExists(tgtConn, targetTable.Schema); err != nil {
+		return 0, err
 	}
 
 	if cfg.Target.Type == dbio.TypeDbProton && cfg.Mode == IncrementalMode {
@@ -465,7 +456,7 @@ func (t *TaskExecution) writeDirectly(cfg *Config, df *iop.Dataflow, tgtConn dat
 	}()
 
 	df.Columns = sampleData.Columns
-	setStage("4 - load-into-temp")
+	setStage("5 - load-into-final")
 
 	t.AddCleanupTaskFirst(func() {
 		if cast.ToBool(os.Getenv("SLING_KEEP_TEMP")) {
@@ -542,10 +533,10 @@ func (t *TaskExecution) writeDirectly(cfg *Config, df *iop.Dataflow, tgtConn dat
 		}
 	}
 
-	df.Unpause() // to create DDL and set column change functions
-	t.SetProgress("streaming data")
+	df.Unpause() // Resume dataflow
+	t.SetProgress("streaming data (direct insert)")
 
-	// set batch size if specified
+	// Set batch limit if specified
 	if batchLimit := cfg.Target.Options.BatchLimit; batchLimit != nil {
 		df.SetBatchLimit(*batchLimit)
 	}
@@ -554,49 +545,34 @@ func (t *TaskExecution) writeDirectly(cfg *Config, df *iop.Dataflow, tgtConn dat
 	cnt, err = tgtConn.BulkImportFlow(targetTable.FullName(), df)
 	if err != nil {
 		tgtConn.Rollback()
-		if cast.ToBool(os.Getenv("SLING_CLI")) && cfg.sourceIsFile() {
-			err = g.Error(err, "could not insert into %s.", targetTable.FullName())
-		} else {
-			err = g.Error(err, "could not insert into "+targetTable.FullName())
-		}
-		return
-	}
-
-	tgtConn.Commit()
-	t.PBar.Finish()
-
-	// Handle empty data case
-	if cnt == 0 && !cast.ToBool(os.Getenv("SLING_ALLOW_EMPTY_TABLES")) && !cast.ToBool(os.Getenv("SLING_ALLOW_EMPTY")) {
-		g.Warn("No data or records found in stream. Nothing to do. To allow Sling to create empty tables, set SLING_ALLOW_EMPTY=TRUE")
-		return 0, nil
-	} else if cnt > 0 {
-		// FIXME: find root cause of why columns don't sync while streaming
-		df.SyncColumns()
-
-		// Aggregate stats from stream processors
-		df.Inferred = !cfg.sourceIsFile() // Re-infer if source is file
-		df.SyncStats()
-
-		// Checksum Comparison, data quality. Limit to env var SLING_CHECKSUM_ROWS, cause sums get too high
-		if val := cast.ToUint64(os.Getenv("SLING_CHECKSUM_ROWS")); val > 0 && df.Count() <= val {
-			err = tgtConn.CompareChecksums(targetTable.FullName(), df.Columns)
-			if err != nil {
-				return
-			}
-		}
-	}
-
-	// Validate data
-	tCnt, err := tgtConn.GetCount(targetTable.FullName())
-	if err != nil {
-		err = g.Error(err, "could not get count from final table %s", targetTable.FullName())
+		err = g.Error(err, "could not insert into "+targetTable.FullName())
 		return 0, err
-	} else {
+	}
+
+	// Validate data only for full-refresh or truncate
+	// otherwise, we cannot validate the data.
+	if g.In(cfg.Mode, FullRefreshMode, TruncateMode) {
+		tCnt, err := tgtConn.GetCount(targetTable.FullName())
+		if err != nil {
+			err = g.Error(err, "could not get count from final table %s", targetTable.FullName())
+			return 0, err
+		}
 		if cnt != tCnt {
-			g.Warn("inserted into final table but target table %s count (%d) != new inserted count (%d). Records missing/mismatch.", targetTable.FullName(), tCnt, cnt)
+			err = g.Error("inserted into final table but table count (%d) != stream count (%d). Records missing/mismatch. Aborting", tCnt, cnt)
+			return 0, err
 		} else if tCnt == 0 && len(sampleData.Rows) > 0 {
 			err = g.Error("Loaded 0 records while sample data has %d records. Exiting.", len(sampleData.Rows))
 			return 0, err
+		}
+
+		if cnt > 0 {
+			// Checksum Comparison, data quality. Limit to env var SLING_CHECKSUM_ROWS, cause sums get too high
+			if val := cast.ToUint64(os.Getenv("SLING_CHECKSUM_ROWS")); val > 0 && df.Count() <= val {
+				err = tgtConn.CompareChecksums(targetTable.FullName(), df.Columns)
+				if err != nil {
+					return cnt, g.Error(err, "error validating checksums")
+				}
+			}
 		}
 	}
 
@@ -604,6 +580,11 @@ func (t *TaskExecution) writeDirectly(cfg *Config, df *iop.Dataflow, tgtConn dat
 	if err := tgtConn.Commit(); err != nil {
 		err = g.Error(err, "could not commit final transaction")
 		return 0, err
+	}
+
+	// Handle empty data case
+	if cnt == 0 {
+		g.Warn("No data or records found in stream. Nothing to insert.")
 	}
 
 	// Execute post-SQL
