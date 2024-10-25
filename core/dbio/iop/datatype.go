@@ -445,11 +445,11 @@ func (cols Columns) MakeShaper(tgtColumns Columns) (shaper *Shaper, err error) {
 	}
 
 	// determine diff, and match order of target columns
-	tgtColNames := tgtColumns.Names(true)
+	tgtColNames := tgtColumns.Names(false)
 	diffCols := len(tgtColumns) != len(srcColumns)
 	colMap := map[int]int{}
 	for s, col := range srcColumns {
-		t := lo.IndexOf(tgtColNames, strings.ToLower(col.Name))
+		t := lo.IndexOf(tgtColNames, col.Name)
 		if t == -1 {
 			err = g.Error("column %s not found in target columns", col.Name)
 			return
@@ -596,12 +596,21 @@ func (cols Columns) GetColumn(name string) *Column {
 	return colsMap[strings.ToLower(name)]
 }
 
+// GetColumnWithOriginalCase returns the matched Col
+func (cols Columns) GetColumnWithOriginalCase(name string) *Column {
+	colsMap := map[string]*Column{}
+	for _, col := range cols {
+		colsMap[col.Name] = &col
+	}
+	return colsMap[name]
+}
+
 func (cols Columns) Merge(newCols Columns, overwrite bool) (col2 Columns, added schemaChg, changed []schemaChg) {
 	added = schemaChg{Added: true}
 
-	existingIndexMap := cols.FieldMap(true)
+	existingIndexMap := cols.FieldMap(false)
 	for _, newCol := range newCols {
-		key := strings.ToLower(newCol.Name)
+		key := newCol.Name
 		if i, ok := existingIndexMap[key]; ok {
 			col := cols[i]
 			if overwrite {
@@ -647,10 +656,9 @@ func (cols Columns) IsSimilarTo(otherCols Columns) bool {
 		return false
 	}
 
-	otherColsMap := cols.FieldMap(true)
+	otherColsMap := cols.FieldMap(false)
 	for _, col := range cols {
-		colName := strings.ToLower(col.Name)
-		if _, found := otherColsMap[colName]; !found {
+		if _, found := otherColsMap[col.Name]; !found {
 			return false
 		}
 	}

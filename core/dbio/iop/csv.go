@@ -43,7 +43,6 @@ type CSV struct {
 func CleanHeaderRow(header []string) []string {
 	// replace any other chars than regex expression
 	regexAllow := *regexp.MustCompile(`[^a-zA-Z0-9_]`)
-	fieldMap := map[string]string{}
 
 	transformer := transform.Chain(norm.NFD, runes.Remove(runes.In(unicode.Mn)), norm.NFC)
 	for i, field := range header {
@@ -64,16 +63,9 @@ func CleanHeaderRow(header []string) []string {
 			field = "col"
 		}
 
-		// avoid duplicates
-		j := 1
-		newField := field
-		for fieldMap[newField] != "" {
-			newField = g.F("%s%d", field, j)
-			j++
-		}
-
-		fieldMap[newField] = field
-		header[i] = strings.ToLower(newField)
+		header[i] = field
+		/// timeplus@yokofly, see issue https://github.com/slingdata-io/sling-cli/issues/417
+		/// we need to preserve the original case for proton
 	}
 
 	return header

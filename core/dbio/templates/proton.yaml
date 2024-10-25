@@ -45,6 +45,7 @@ metadata:
     from system.columns
     where database = '{schema}'
       and table = '{table}'
+      and default_kind != 'ALIAS'
     order by position
 
   primary_keys: |

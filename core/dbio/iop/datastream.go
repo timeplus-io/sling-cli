@@ -1207,10 +1207,10 @@ func (ds *Datastream) ConsumeCsvReaderChl(readerChn chan *ReaderReady) (err erro
 				row0 = CleanHeaderRow(row0)
 
 				// some files may have new columns
-				fm := it.ds.Columns.FieldMap(true)
+				fm := it.ds.Columns.FieldMap(false)
 				toAdd := Columns{}
 				for _, name := range row0 {
-					if _, ok := fm[strings.ToLower(name)]; !ok {
+					if _, ok := fm[name]; !ok {
 						// field is not found, so we need to add
 						toAdd = append(toAdd, Column{Name: name, Type: StringType, Position: len(it.ds.Columns) + 1})
 					}
@@ -1223,10 +1223,10 @@ func (ds *Datastream) ConsumeCsvReaderChl(readerChn chan *ReaderReady) (err erro
 
 				// set column mapping if in different order
 				if g.Marshal(row0) != g.Marshal(it.ds.Columns.Names()) {
-					fm := it.ds.Columns.FieldMap(true)
+					fm := it.ds.Columns.FieldMap(false)
 					colMap = map[int]int{}
 					for incorrectI, name := range row0 {
-						colMap[incorrectI] = fm[strings.ToLower(name)]
+						colMap[incorrectI] = fm[name]
 					}
 				} else {
 					colMap = nil
@@ -2025,7 +2025,7 @@ func (ds *Datastream) NewCsvReaderChnl(rowLimit int, bytesLimit int64) (readerCh
 			}
 
 			if ds.config.Header {
-				bw, err := w.Write(batch.Columns.Names(true, true))
+				bw, err := w.Write(batch.Columns.Names(false, true))
 				tbw = tbw + cast.ToInt64(bw)
 				if err != nil {
 					err = g.Error(err, "error writing header")
@@ -2480,7 +2480,7 @@ func (ds *Datastream) NewCsvReader(rowLimit int, bytesLimit int64) *io.PipeReade
 		}
 
 		if ds.config.Header {
-			bw, err := w.Write(batch.Columns.Names(true, true))
+			bw, err := w.Write(batch.Columns.Names(false, true))
 			tbw = tbw + cast.ToInt64(bw)
 			if err != nil {
 				ds.Context.CaptureErr(g.Error(err, "error writing header"))
