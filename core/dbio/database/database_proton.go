@@ -117,7 +117,6 @@ func (conn *ProtonConn) Init() error {
 	conn.retryBackoff.InitialInterval = 1 * time.Second
 	conn.retryBackoff.MaxInterval = 10 * time.Second
 	conn.retryBackoff.Multiplier = 2.0
-
 	return conn.BaseConn.Init()
 }
 
@@ -195,10 +194,7 @@ func (conn *ProtonConn) GenerateDDL(table Table, data iop.Dataset, temporary boo
 func retryWithBackoff(operation func() error) error {
 	b := backoff.NewExponentialBackOff()
 	b.MaxElapsedTime = 5 * time.Minute // Set a maximum total retry time
-	b.MaxElapsedTime = 5 * time.Minute
 	b.InitialInterval = 1 * time.Second
-	b.MaxInterval = 10 * time.Second
-	b.Multiplier = 2.0
 
 	return backoff.RetryNotify(operation, b, func(err error, duration time.Duration) {
 		g.Warn("Operation failed, retrying in %v: %v", duration, err)
@@ -249,13 +245,12 @@ func (conn *ProtonConn) BulkImportStream(tableFName string, ds *iop.Datastream) 
 		}
 
 		batchCount++
-		err = retryWithBackoff(func() error {
-			return conn.processBatch(tableFName, table, batch, columns, batchCount, &count, ds)
-		})
-
+		err = conn.processBatch(tableFName, table, batch, columns, batchCount, &count, ds)
 		if err != nil {
-			g.Error("Failed to process batch %d after %d retries: %v", batchCount, maxRetries, err)
-			return count, g.Error(err, "could not copy data after retries")
+			if permanentErr, ok := err.(*backoff.PermanentError); ok {
+				return count, g.Error(permanentErr.Err, "permanent error processing batch %d", batchCount)
+			}
+			return count, g.Error(err, "failed to process batch %d after retries", batchCount)
 		}
 	}
 
@@ -291,12 +286,8 @@ func (conn *ProtonConn) processBatch(tableFName string, table Table, batch *iop.
 
 		insFields, err := conn.ValidateColumnNames(columns, batch.Columns.Names(), true)
 		if err != nil {
-			return g.Error(err, "columns mismatch")
+			return backoff.Permanent(g.Error(err, "columns mismatch"))
 		}
-
-		// Enable idempotent support with a specific prefix
-		idPrefix := fmt.Sprintf("%d_batch_%s", batchCount, time.Now().Format("20060102150405"))
-		conn.SetIdempotent(true, idPrefix)
 
 		insertStatement := conn.GenerateInsertStatement(
 			table.FullName(),
@@ -857,11 +848,11 @@ func (conn *ProtonConn) processBatch(tableFName string, table Table, batch *iop.
 			return g.Error(err, "could not commit transaction")
 		}
 
+		// Update count only after successful commit
 		*count += internalCount
 		return nil
 	}
 
-	// Use the configured backoff for retries
 	return backoff.RetryNotify(operation,
 		conn.retryBackoff,
 		func(err error, duration time.Duration) {
