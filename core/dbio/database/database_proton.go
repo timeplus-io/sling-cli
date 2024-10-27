@@ -73,6 +73,7 @@ type ProtonConn struct {
 	Idempotent       bool
 	IdempotentPrefix string
 	ProtonConn       proton.Conn
+	retryBackoff     *backoff.ExponentialBackOff
 }
 
 // Init initiates the object
@@ -110,6 +111,12 @@ func (conn *ProtonConn) Init() error {
 
 	instance := Connection(conn)
 	conn.BaseConn.instance = &instance
+
+	conn.retryBackoff = backoff.NewExponentialBackOff()
+	conn.retryBackoff.MaxElapsedTime = 5 * time.Minute
+	conn.retryBackoff.InitialInterval = 1 * time.Second
+	conn.retryBackoff.MaxInterval = 10 * time.Second
+	conn.retryBackoff.Multiplier = 2.0
 	return conn.BaseConn.Init()
 }
 
@@ -187,6 +194,7 @@ func (conn *ProtonConn) GenerateDDL(table Table, data iop.Dataset, temporary boo
 func retryWithBackoff(operation func() error) error {
 	b := backoff.NewExponentialBackOff()
 	b.MaxElapsedTime = 5 * time.Minute // Set a maximum total retry time
+	b.InitialInterval = 1 * time.Second
 
 	return backoff.RetryNotify(operation, b, func(err error, duration time.Duration) {
 		g.Warn("Operation failed, retrying in %v: %v", duration, err)
@@ -237,13 +245,12 @@ func (conn *ProtonConn) BulkImportStream(tableFName string, ds *iop.Datastream) 
 		}
 
 		batchCount++
-		err = retryWithBackoff(func() error {
-			return conn.processBatch(tableFName, table, batch, columns, batchCount, &count, ds)
-		})
-
+		err = conn.processBatch(tableFName, table, batch, columns, batchCount, &count, ds)
 		if err != nil {
-			g.Error("Failed to process batch %d after %d retries: %v", batchCount, maxRetries, err)
-			return count, g.Error(err, "could not copy data after retries")
+			if permanentErr, ok := err.(*backoff.PermanentError); ok {
+				return count, g.Error(permanentErr.Err, "permanent error processing batch %d", batchCount)
+			}
+			return count, g.Error(err, "failed to process batch %d after retries", batchCount)
 		}
 	}
 
@@ -255,585 +262,602 @@ func (conn *ProtonConn) BulkImportStream(tableFName string, ds *iop.Datastream) 
 
 // processBatch handles the processing of a single batch
 func (conn *ProtonConn) processBatch(tableFName string, table Table, batch *iop.Batch, columns iop.Columns, batchCount int, count *uint64, ds *iop.Datastream) error {
-	// COPY needs a transaction
-	if conn.Tx() == nil {
-		err := conn.Begin(&sql.TxOptions{Isolation: sql.LevelDefault})
-		if err != nil {
-			return g.Error(err, "could not begin transaction")
-		}
-		defer conn.Rollback()
-	}
-
-	insFields, err := conn.ValidateColumnNames(columns, batch.Columns.Names(), true)
-	if err != nil {
-		return g.Error(err, "columns mismatch")
-	}
-
-	// Enable idempotent support with a specific prefix
-	idPrefix := fmt.Sprintf("%d_batch_%s", batchCount, time.Now().Format("20060102150405"))
+	// Generate idempotent ID once for all retries
+	idPrefix := fmt.Sprintf("%d_%d_batch_%s",
+		time.Now().UnixNano(), // Unique timestamp
+		batchCount,            // Batch number
+		table.FullName())      // Table name for uniqueness
 	conn.SetIdempotent(true, idPrefix)
 
-	insertStatement := conn.GenerateInsertStatement(
-		table.FullName(),
-		insFields,
-		1,
-	)
-
-	batched, err := conn.ProtonConn.PrepareBatch(ds.Context.Ctx, insertStatement)
-	if err != nil {
-		return g.Error(err, "could not prepare statement for table: %s, statement: %s", table.FullName(), insertStatement)
-	}
-
-	decimalCols := []int{}
-	intCols := []int{}
-	int8Cols := []int{}
-	int16Cols := []int{}
-	int32Cols := []int{}
-	int64Cols := []int{}
-	uint8Cols := []int{}
-	uint16Cols := []int{}
-	uint32Cols := []int{}
-	uint64Cols := []int{}
-	float32Cols := []int{}
-	float64Cols := []int{}
-	floatCols := []int{}
-	stringCols := []int{}
-	booleanCols := []int{}
-
-	// Array types
-	arrayStringCols := []int{}
-	arrayBooleanCols := []int{}
-	arrayInt8Cols := []int{}
-	arrayInt16Cols := []int{}
-	arrayInt32Cols := []int{}
-	arrayInt64Cols := []int{}
-	arrayUint8Cols := []int{}
-	arrayUint16Cols := []int{}
-	arrayUint32Cols := []int{}
-	arrayUint64Cols := []int{}
-	arrayFloat32Cols := []int{}
-	arrayFloat64Cols := []int{}
-
-	// Map types
-	mapStringStringCols := []int{}
-	mapStringInt32Cols := []int{}
-	mapStringInt64Cols := []int{}
-	mapStringUint32Cols := []int{}
-	mapStringUint64Cols := []int{}
-	mapStringFloat64Cols := []int{}
-	mapStringFloat32Cols := []int{}
-	mapStringArrayStringCols := []int{}
-	mapInt32StringCols := []int{}
-	mapInt64StringCols := []int{}
-
-	for i, col := range batch.Columns {
-		dbType := strings.ToLower(col.DbType)
-		if strings.HasPrefix(dbType, "nullable(") {
-			dbType = strings.TrimPrefix(dbType, "nullable(")
-			dbType = strings.TrimSuffix(dbType, ")")
-		}
-		if strings.HasPrefix(dbType, "low_cardinality(") {
-			dbType = strings.TrimPrefix(dbType, "low_cardinality(")
-			dbType = strings.TrimSuffix(dbType, ")")
-		}
-
-		switch dbType {
-		case "int8":
-			int8Cols = append(int8Cols, i)
-		case "int16":
-			int16Cols = append(int16Cols, i)
-		case "int32":
-			int32Cols = append(int32Cols, i)
-		case "int64":
-			int64Cols = append(int64Cols, i)
-		case "uint8":
-			uint8Cols = append(uint8Cols, i)
-		case "uint16":
-			uint16Cols = append(uint16Cols, i)
-		case "uint32":
-			uint32Cols = append(uint32Cols, i)
-		case "uint64":
-			uint64Cols = append(uint64Cols, i)
-		case "float32":
-			float32Cols = append(float32Cols, i)
-		case "float64":
-			float64Cols = append(float64Cols, i)
-		case "string":
-			stringCols = append(stringCols, i)
-		case "bool":
-			booleanCols = append(booleanCols, i)
-		case "array(string)":
-			arrayStringCols = append(arrayStringCols, i)
-		case "array(bool)", "array(boolean)":
-			arrayBooleanCols = append(arrayBooleanCols, i)
-		case "array(int64)":
-			arrayInt64Cols = append(arrayInt64Cols, i)
-		case "array(int32)":
-			arrayInt32Cols = append(arrayInt32Cols, i)
-		case "array(int16)":
-			arrayInt16Cols = append(arrayInt16Cols, i)
-		case "array(int8)":
-			arrayInt8Cols = append(arrayInt8Cols, i)
-		case "array(uint64)":
-			arrayUint64Cols = append(arrayUint64Cols, i)
-		case "array(uint32)":
-			arrayUint32Cols = append(arrayUint32Cols, i)
-		case "array(uint16)":
-			arrayUint16Cols = append(arrayUint16Cols, i)
-		case "array(uint8)":
-			arrayUint8Cols = append(arrayUint8Cols, i)
-		case "array(float32)":
-			arrayFloat32Cols = append(arrayFloat32Cols, i)
-		case "array(float64)":
-			arrayFloat64Cols = append(arrayFloat64Cols, i)
-		case "map(string, string)":
-			mapStringStringCols = append(mapStringStringCols, i)
-		case "map(string, int32)":
-			mapStringInt32Cols = append(mapStringInt32Cols, i)
-		case "map(string, int64)":
-			mapStringInt64Cols = append(mapStringInt64Cols, i)
-		case "map(string, uint32)":
-			mapStringUint32Cols = append(mapStringUint32Cols, i)
-		case "map(string, uint64)":
-			mapStringUint64Cols = append(mapStringUint64Cols, i)
-		case "map(string, float64)":
-			mapStringFloat64Cols = append(mapStringFloat64Cols, i)
-		case "map(string, float32)":
-			mapStringFloat32Cols = append(mapStringFloat32Cols, i)
-		case "map(string, array(string))":
-			mapStringArrayStringCols = append(mapStringArrayStringCols, i)
-		case "map(int32, string)":
-			mapInt32StringCols = append(mapInt32StringCols, i)
-		case "map(int64, string)":
-			mapInt64StringCols = append(mapInt64StringCols, i)
-
-		default:
-			// Fall back to col.Type if DbType is not recognized
-			switch {
-			case col.Type == iop.DecimalType:
-				decimalCols = append(decimalCols, i)
-			case col.Type == iop.SmallIntType:
-				intCols = append(intCols, i)
-			case col.Type.IsInteger():
-				int64Cols = append(int64Cols, i)
-			case col.Type == iop.FloatType:
-				floatCols = append(floatCols, i)
+	operation := func() error {
+		// Start fresh transaction
+		if conn.Tx() == nil {
+			err := conn.Begin(&sql.TxOptions{Isolation: sql.LevelDefault})
+			if err != nil {
+				return backoff.Permanent(g.Error(err, "could not begin transaction"))
 			}
-		}
-	}
-
-	// Counter for successfully inserts within this batch
-	var internalCount uint64
-	for row := range batch.Rows {
-		var eG g.ErrorGroup
-
-		// set decimals correctly
-		for _, colI := range decimalCols {
-			if row[colI] != nil {
-				val, err := decimal.NewFromString(cast.ToString(row[colI]))
-				if err == nil {
-					row[colI] = val
+			var opErr error
+			defer func() {
+				if opErr != nil {
+					conn.Rollback()
 				}
-				eG.Capture(err)
-			} else {
-				row[colI] = decimal.Zero
-				g.Debug("decimal if value == nil")
-			}
+			}()
 		}
 
-		for _, colI := range booleanCols {
-			if row[colI] != nil {
-				row[colI], err = cast.ToBoolE(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = false
-				g.Debug("boolean if value == nil")
-			}
-		}
-
-		for _, colI := range stringCols {
-			if row[colI] != nil {
-				row[colI], err = cast.ToStringE(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = ""
-				g.Debug("string if value == nil")
-			}
-		}
-
-		for _, colI := range int8Cols {
-			if row[colI] != nil {
-				row[colI], err = cast.ToInt8E(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = int8(0)
-				g.Debug("int8 if value == nil")
-			}
-		}
-
-		for _, colI := range int16Cols {
-			if row[colI] != nil {
-				row[colI], err = cast.ToInt16E(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = int16(0)
-				g.Debug("int16 if value == nil")
-			}
-		}
-
-		for _, colI := range int32Cols {
-			if row[colI] != nil {
-				row[colI], err = cast.ToInt32E(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = int32(0)
-				g.Debug("int32 if value == nil")
-			}
-		}
-
-		// set Int32 correctly
-		for _, colI := range intCols {
-			if row[colI] != nil {
-				row[colI], err = cast.ToIntE(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = int(0)
-				g.Debug("int if value == nil")
-			}
-		}
-
-		// set Int64 correctly
-		for _, colI := range int64Cols {
-			if row[colI] != nil {
-				row[colI], err = cast.ToInt64E(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = int64(0)
-				g.Debug("int64 if value == nil")
-			}
-		}
-
-		for _, colI := range uint8Cols {
-			if row[colI] != nil {
-				row[colI], err = cast.ToUint8E(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = uint8(0)
-				g.Debug("uint8 if value == nil")
-			}
-		}
-
-		for _, colI := range uint16Cols {
-			if row[colI] != nil {
-				row[colI], err = cast.ToUint16E(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = uint16(0)
-				g.Debug("uint16 if value == nil")
-			}
-		}
-
-		// set Int32 correctly
-		for _, colI := range uint32Cols {
-			if row[colI] != nil {
-				row[colI], err = cast.ToUint32E(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = uint32(0)
-				g.Debug("uint32 if value == nil")
-			}
-		}
-
-		// set Int64 correctly
-		for _, colI := range uint64Cols {
-			if row[colI] != nil {
-				row[colI], err = cast.ToUint64E(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = uint64(0)
-				g.Debug("uint64 if value == nil")
-			}
-		}
-
-		// set Float64 correctly
-		for _, colI := range floatCols {
-			if row[colI] != nil {
-				row[colI], err = cast.ToFloat64E(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = float64(0)
-				g.Debug("float64 if value == nil")
-			}
-		}
-
-		for _, colI := range float32Cols {
-			if row[colI] != nil {
-				row[colI], err = cast.ToFloat32E(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = float32(0)
-				g.Debug("float32 if value == nil")
-			}
-		}
-
-		for _, colI := range float64Cols {
-			if row[colI] != nil {
-				row[colI], err = cast.ToFloat64E(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = float64(0)
-				g.Debug("float64 if value == nil")
-			}
-		}
-
-		for _, colI := range arrayStringCols {
-			if row[colI] != nil {
-				row[colI], err = conn.convertToArrayString(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = []string{}
-				g.Debug("empty arraystring if value == nil")
-			}
-		}
-
-		for _, colI := range arrayBooleanCols {
-			if row[colI] != nil {
-				row[colI], err = conn.convertToArrayBool(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = []bool{}
-				g.Debug("empty arrayboolean if value == nil")
-			}
-		}
-
-		for _, colI := range arrayInt8Cols {
-			if row[colI] != nil {
-				row[colI], err = conn.convertToArrayInt8(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = []int8{}
-				g.Debug("empty arrayint8 if value == nil")
-			}
-		}
-
-		for _, colI := range arrayInt16Cols {
-			if row[colI] != nil {
-				row[colI], err = conn.convertToArrayInt16(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = []int16{}
-				g.Debug("empty arrayint16 if value == nil")
-			}
-		}
-
-		for _, colI := range arrayInt32Cols {
-			if row[colI] != nil {
-				row[colI], err = conn.convertToArrayInt32(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = []int32{}
-				g.Debug("empty arrayint32 if value == nil")
-			}
-		}
-
-		for _, colI := range arrayInt64Cols {
-			if row[colI] != nil {
-				row[colI], err = conn.convertToArrayInt64(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = []int64{}
-				g.Debug("empty arrayint64 if value == nil")
-			}
-		}
-
-		for _, colI := range arrayUint8Cols {
-			if row[colI] != nil {
-				row[colI], err = conn.convertToArrayUint8(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = []uint8{}
-				g.Debug("empty arrayuint8 if value == nil")
-			}
-		}
-
-		for _, colI := range arrayUint16Cols {
-			if row[colI] != nil {
-				row[colI], err = conn.convertToArrayUint16(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = []uint16{}
-				g.Debug("empty arrayuint16 if value == nil")
-			}
-		}
-
-		for _, colI := range arrayUint32Cols {
-			if row[colI] != nil {
-				row[colI], err = conn.convertToArrayUint32(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = []uint32{}
-				g.Debug("empty arrayuint32 if value == nil")
-			}
-		}
-
-		for _, colI := range arrayUint64Cols {
-			if row[colI] != nil {
-				row[colI], err = conn.convertToArrayUint64(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = []uint64{}
-				g.Debug("empty arrayuint64 if value == nil")
-			}
-		}
-
-		for _, colI := range arrayFloat32Cols {
-			if row[colI] != nil {
-				row[colI], err = conn.convertToArrayFloat32(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = []float32{}
-				g.Debug("empty arrayfloat32 if value == nil")
-			}
-		}
-
-		for _, colI := range arrayFloat64Cols {
-			if row[colI] != nil {
-				row[colI], err = conn.convertToArrayFloat64(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = []float64{}
-				g.Debug("empty arrayfloat64 if value == nil")
-			}
-		}
-
-		for _, colI := range mapStringStringCols {
-			if row[colI] != nil {
-				row[colI], err = conn.convertToMapStringString(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = map[string]string{}
-				g.Debug("empty mapstringstring if value == nil")
-			}
-		}
-
-		for _, colI := range mapStringInt32Cols {
-			if row[colI] != nil {
-				row[colI], err = conn.convertToMapStringInt32(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = map[string]int32{}
-				g.Debug("empty mapstringint32 if value == nil")
-			}
-		}
-
-		for _, colI := range mapStringInt64Cols {
-			if row[colI] != nil {
-				row[colI], err = conn.convertToMapStringInt64(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = map[string]int64{}
-				g.Debug("empty mapstringint64 if value == nil")
-			}
-		}
-
-		for _, colI := range mapStringUint32Cols {
-			if row[colI] != nil {
-				row[colI], err = conn.convertToMapStringUint32(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = map[string]uint32{}
-				g.Debug("empty mapstringuint32 if value == nil")
-			}
-		}
-
-		for _, colI := range mapStringUint64Cols {
-			if row[colI] != nil {
-				row[colI], err = conn.convertToMapStringUint64(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = map[string]uint64{}
-				g.Debug("empty mapstringuint64 if value == nil")
-			}
-		}
-
-		for _, colI := range mapStringFloat64Cols {
-			if row[colI] != nil {
-				row[colI], err = conn.convertToMapStringFloat64(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = map[string]float64{}
-				g.Debug("empty mapstringfloat64 if value == nil")
-			}
-		}
-
-		for _, colI := range mapStringFloat32Cols {
-			if row[colI] != nil {
-				row[colI], err = conn.convertToMapStringFloat32(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = map[string]float32{}
-				g.Debug("empty mapstringfloat32 if value == nil")
-			}
-		}
-
-		for _, colI := range mapStringArrayStringCols {
-			if row[colI] != nil {
-				row[colI], err = conn.convertToMapStringArrayString(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = map[string][]string{}
-				g.Debug("empty mapstringarraystring if value == nil")
-			}
-		}
-
-		for _, colI := range mapInt32StringCols {
-			if row[colI] != nil {
-				row[colI], err = conn.convertToMapInt32String(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = map[int32]string{}
-				g.Debug("empty mapint32string if value == nil")
-			}
-		}
-
-		for _, colI := range mapInt64StringCols {
-			if row[colI] != nil {
-				row[colI], err = conn.convertToMapInt64String(row[colI])
-				eG.Capture(err)
-			} else {
-				row[colI] = map[int64]string{}
-				g.Debug("empty mapint64string if value == nil")
-			}
-		}
-
-		if err = eG.Err(); err != nil {
-			err = g.Error(err, "could not convert value for COPY into table %s", tableFName)
-			ds.Context.CaptureErr(err)
-			return err
-		}
-
-		// Do insert
-		ds.Context.Lock()
-		err = batched.Append(row...)
-		ds.Context.Unlock()
+		insFields, err := conn.ValidateColumnNames(columns, batch.Columns.Names(), true)
 		if err != nil {
-			ds.Context.CaptureErr(g.Error(err, "could not insert into table %s, row: %#v", tableFName, row))
-			return g.Error(err, "could not execute statement")
+			return backoff.Permanent(g.Error(err, "columns mismatch"))
 		}
-		internalCount++
-	}
-	err = batched.Send()
-	if err != nil {
-		return g.Error(err, "could not send batch data")
+
+		insertStatement := conn.GenerateInsertStatement(
+			table.FullName(),
+			insFields,
+			1,
+		)
+
+		batched, err := conn.ProtonConn.PrepareBatch(ds.Context.Ctx, insertStatement)
+		if err != nil {
+			return g.Error(err, "could not prepare statement for table: %s, statement: %s", table.FullName(), insertStatement)
+		}
+
+		decimalCols := []int{}
+		intCols := []int{}
+		int8Cols := []int{}
+		int16Cols := []int{}
+		int32Cols := []int{}
+		int64Cols := []int{}
+		uint8Cols := []int{}
+		uint16Cols := []int{}
+		uint32Cols := []int{}
+		uint64Cols := []int{}
+		float32Cols := []int{}
+		float64Cols := []int{}
+		floatCols := []int{}
+		stringCols := []int{}
+		booleanCols := []int{}
+
+		// Array types
+		arrayStringCols := []int{}
+		arrayBooleanCols := []int{}
+		arrayInt8Cols := []int{}
+		arrayInt16Cols := []int{}
+		arrayInt32Cols := []int{}
+		arrayInt64Cols := []int{}
+		arrayUint8Cols := []int{}
+		arrayUint16Cols := []int{}
+		arrayUint32Cols := []int{}
+		arrayUint64Cols := []int{}
+		arrayFloat32Cols := []int{}
+		arrayFloat64Cols := []int{}
+
+		// Map types
+		mapStringStringCols := []int{}
+		mapStringInt32Cols := []int{}
+		mapStringInt64Cols := []int{}
+		mapStringUint32Cols := []int{}
+		mapStringUint64Cols := []int{}
+		mapStringFloat64Cols := []int{}
+		mapStringFloat32Cols := []int{}
+		mapStringArrayStringCols := []int{}
+		mapInt32StringCols := []int{}
+		mapInt64StringCols := []int{}
+
+		for i, col := range batch.Columns {
+			dbType := strings.ToLower(col.DbType)
+			if strings.HasPrefix(dbType, "nullable(") {
+				dbType = strings.TrimPrefix(dbType, "nullable(")
+				dbType = strings.TrimSuffix(dbType, ")")
+			}
+			if strings.HasPrefix(dbType, "low_cardinality(") {
+				dbType = strings.TrimPrefix(dbType, "low_cardinality(")
+				dbType = strings.TrimSuffix(dbType, ")")
+			}
+
+			switch dbType {
+			case "int8":
+				int8Cols = append(int8Cols, i)
+			case "int16":
+				int16Cols = append(int16Cols, i)
+			case "int32":
+				int32Cols = append(int32Cols, i)
+			case "int64":
+				int64Cols = append(int64Cols, i)
+			case "uint8":
+				uint8Cols = append(uint8Cols, i)
+			case "uint16":
+				uint16Cols = append(uint16Cols, i)
+			case "uint32":
+				uint32Cols = append(uint32Cols, i)
+			case "uint64":
+				uint64Cols = append(uint64Cols, i)
+			case "float32":
+				float32Cols = append(float32Cols, i)
+			case "float64":
+				float64Cols = append(float64Cols, i)
+			case "string":
+				stringCols = append(stringCols, i)
+			case "bool":
+				booleanCols = append(booleanCols, i)
+			case "array(string)":
+				arrayStringCols = append(arrayStringCols, i)
+			case "array(bool)", "array(boolean)":
+				arrayBooleanCols = append(arrayBooleanCols, i)
+			case "array(int64)":
+				arrayInt64Cols = append(arrayInt64Cols, i)
+			case "array(int32)":
+				arrayInt32Cols = append(arrayInt32Cols, i)
+			case "array(int16)":
+				arrayInt16Cols = append(arrayInt16Cols, i)
+			case "array(int8)":
+				arrayInt8Cols = append(arrayInt8Cols, i)
+			case "array(uint64)":
+				arrayUint64Cols = append(arrayUint64Cols, i)
+			case "array(uint32)":
+				arrayUint32Cols = append(arrayUint32Cols, i)
+			case "array(uint16)":
+				arrayUint16Cols = append(arrayUint16Cols, i)
+			case "array(uint8)":
+				arrayUint8Cols = append(arrayUint8Cols, i)
+			case "array(float32)":
+				arrayFloat32Cols = append(arrayFloat32Cols, i)
+			case "array(float64)":
+				arrayFloat64Cols = append(arrayFloat64Cols, i)
+			case "map(string, string)":
+				mapStringStringCols = append(mapStringStringCols, i)
+			case "map(string, int32)":
+				mapStringInt32Cols = append(mapStringInt32Cols, i)
+			case "map(string, int64)":
+				mapStringInt64Cols = append(mapStringInt64Cols, i)
+			case "map(string, uint32)":
+				mapStringUint32Cols = append(mapStringUint32Cols, i)
+			case "map(string, uint64)":
+				mapStringUint64Cols = append(mapStringUint64Cols, i)
+			case "map(string, float64)":
+				mapStringFloat64Cols = append(mapStringFloat64Cols, i)
+			case "map(string, float32)":
+				mapStringFloat32Cols = append(mapStringFloat32Cols, i)
+			case "map(string, array(string))":
+				mapStringArrayStringCols = append(mapStringArrayStringCols, i)
+			case "map(int32, string)":
+				mapInt32StringCols = append(mapInt32StringCols, i)
+			case "map(int64, string)":
+				mapInt64StringCols = append(mapInt64StringCols, i)
+
+			default:
+				// Fall back to col.Type if DbType is not recognized
+				switch {
+				case col.Type == iop.DecimalType:
+					decimalCols = append(decimalCols, i)
+				case col.Type == iop.SmallIntType:
+					intCols = append(intCols, i)
+				case col.Type.IsInteger():
+					int64Cols = append(int64Cols, i)
+				case col.Type == iop.FloatType:
+					floatCols = append(floatCols, i)
+				}
+			}
+		}
+
+		// Counter for successfully inserts within this batch
+		var internalCount uint64
+		for row := range batch.Rows {
+			var eG g.ErrorGroup
+
+			// set decimals correctly
+			for _, colI := range decimalCols {
+				if row[colI] != nil {
+					val, err := decimal.NewFromString(cast.ToString(row[colI]))
+					if err == nil {
+						row[colI] = val
+					}
+					eG.Capture(err)
+				} else {
+					row[colI] = decimal.Zero
+					g.Debug("decimal if value == nil")
+				}
+			}
+
+			for _, colI := range booleanCols {
+				if row[colI] != nil {
+					row[colI], err = cast.ToBoolE(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = false
+					g.Debug("boolean if value == nil")
+				}
+			}
+
+			for _, colI := range stringCols {
+				if row[colI] != nil {
+					row[colI], err = cast.ToStringE(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = ""
+					g.Debug("string if value == nil")
+				}
+			}
+
+			for _, colI := range int8Cols {
+				if row[colI] != nil {
+					row[colI], err = cast.ToInt8E(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = int8(0)
+					g.Debug("int8 if value == nil")
+				}
+			}
+
+			for _, colI := range int16Cols {
+				if row[colI] != nil {
+					row[colI], err = cast.ToInt16E(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = int16(0)
+					g.Debug("int16 if value == nil")
+				}
+			}
+
+			for _, colI := range int32Cols {
+				if row[colI] != nil {
+					row[colI], err = cast.ToInt32E(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = int32(0)
+					g.Debug("int32 if value == nil")
+				}
+			}
+
+			// set Int32 correctly
+			for _, colI := range intCols {
+				if row[colI] != nil {
+					row[colI], err = cast.ToIntE(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = int(0)
+					g.Debug("int if value == nil")
+				}
+			}
+
+			// set Int64 correctly
+			for _, colI := range int64Cols {
+				if row[colI] != nil {
+					row[colI], err = cast.ToInt64E(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = int64(0)
+					g.Debug("int64 if value == nil")
+				}
+			}
+
+			for _, colI := range uint8Cols {
+				if row[colI] != nil {
+					row[colI], err = cast.ToUint8E(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = uint8(0)
+					g.Debug("uint8 if value == nil")
+				}
+			}
+
+			for _, colI := range uint16Cols {
+				if row[colI] != nil {
+					row[colI], err = cast.ToUint16E(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = uint16(0)
+					g.Debug("uint16 if value == nil")
+				}
+			}
+
+			// set Int32 correctly
+			for _, colI := range uint32Cols {
+				if row[colI] != nil {
+					row[colI], err = cast.ToUint32E(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = uint32(0)
+					g.Debug("uint32 if value == nil")
+				}
+			}
+
+			// set Int64 correctly
+			for _, colI := range uint64Cols {
+				if row[colI] != nil {
+					row[colI], err = cast.ToUint64E(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = uint64(0)
+					g.Debug("uint64 if value == nil")
+				}
+			}
+
+			// set Float64 correctly
+			for _, colI := range floatCols {
+				if row[colI] != nil {
+					row[colI], err = cast.ToFloat64E(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = float64(0)
+					g.Debug("float64 if value == nil")
+				}
+			}
+
+			for _, colI := range float32Cols {
+				if row[colI] != nil {
+					row[colI], err = cast.ToFloat32E(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = float32(0)
+					g.Debug("float32 if value == nil")
+				}
+			}
+
+			for _, colI := range float64Cols {
+				if row[colI] != nil {
+					row[colI], err = cast.ToFloat64E(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = float64(0)
+					g.Debug("float64 if value == nil")
+				}
+			}
+
+			for _, colI := range arrayStringCols {
+				if row[colI] != nil {
+					row[colI], err = conn.convertToArrayString(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = []string{}
+					g.Debug("empty arraystring if value == nil")
+				}
+			}
+
+			for _, colI := range arrayBooleanCols {
+				if row[colI] != nil {
+					row[colI], err = conn.convertToArrayBool(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = []bool{}
+					g.Debug("empty arrayboolean if value == nil")
+				}
+			}
+
+			for _, colI := range arrayInt8Cols {
+				if row[colI] != nil {
+					row[colI], err = conn.convertToArrayInt8(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = []int8{}
+					g.Debug("empty arrayint8 if value == nil")
+				}
+			}
+
+			for _, colI := range arrayInt16Cols {
+				if row[colI] != nil {
+					row[colI], err = conn.convertToArrayInt16(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = []int16{}
+					g.Debug("empty arrayint16 if value == nil")
+				}
+			}
+
+			for _, colI := range arrayInt32Cols {
+				if row[colI] != nil {
+					row[colI], err = conn.convertToArrayInt32(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = []int32{}
+					g.Debug("empty arrayint32 if value == nil")
+				}
+			}
+
+			for _, colI := range arrayInt64Cols {
+				if row[colI] != nil {
+					row[colI], err = conn.convertToArrayInt64(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = []int64{}
+					g.Debug("empty arrayint64 if value == nil")
+				}
+			}
+
+			for _, colI := range arrayUint8Cols {
+				if row[colI] != nil {
+					row[colI], err = conn.convertToArrayUint8(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = []uint8{}
+					g.Debug("empty arrayuint8 if value == nil")
+				}
+			}
+
+			for _, colI := range arrayUint16Cols {
+				if row[colI] != nil {
+					row[colI], err = conn.convertToArrayUint16(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = []uint16{}
+					g.Debug("empty arrayuint16 if value == nil")
+				}
+			}
+
+			for _, colI := range arrayUint32Cols {
+				if row[colI] != nil {
+					row[colI], err = conn.convertToArrayUint32(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = []uint32{}
+					g.Debug("empty arrayuint32 if value == nil")
+				}
+			}
+
+			for _, colI := range arrayUint64Cols {
+				if row[colI] != nil {
+					row[colI], err = conn.convertToArrayUint64(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = []uint64{}
+					g.Debug("empty arrayuint64 if value == nil")
+				}
+			}
+
+			for _, colI := range arrayFloat32Cols {
+				if row[colI] != nil {
+					row[colI], err = conn.convertToArrayFloat32(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = []float32{}
+					g.Debug("empty arrayfloat32 if value == nil")
+				}
+			}
+
+			for _, colI := range arrayFloat64Cols {
+				if row[colI] != nil {
+					row[colI], err = conn.convertToArrayFloat64(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = []float64{}
+					g.Debug("empty arrayfloat64 if value == nil")
+				}
+			}
+
+			for _, colI := range mapStringStringCols {
+				if row[colI] != nil {
+					row[colI], err = conn.convertToMapStringString(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = map[string]string{}
+					g.Debug("empty mapstringstring if value == nil")
+				}
+			}
+
+			for _, colI := range mapStringInt32Cols {
+				if row[colI] != nil {
+					row[colI], err = conn.convertToMapStringInt32(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = map[string]int32{}
+					g.Debug("empty mapstringint32 if value == nil")
+				}
+			}
+
+			for _, colI := range mapStringInt64Cols {
+				if row[colI] != nil {
+					row[colI], err = conn.convertToMapStringInt64(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = map[string]int64{}
+					g.Debug("empty mapstringint64 if value == nil")
+				}
+			}
+
+			for _, colI := range mapStringUint32Cols {
+				if row[colI] != nil {
+					row[colI], err = conn.convertToMapStringUint32(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = map[string]uint32{}
+					g.Debug("empty mapstringuint32 if value == nil")
+				}
+			}
+
+			for _, colI := range mapStringUint64Cols {
+				if row[colI] != nil {
+					row[colI], err = conn.convertToMapStringUint64(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = map[string]uint64{}
+					g.Debug("empty mapstringuint64 if value == nil")
+				}
+			}
+
+			for _, colI := range mapStringFloat64Cols {
+				if row[colI] != nil {
+					row[colI], err = conn.convertToMapStringFloat64(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = map[string]float64{}
+					g.Debug("empty mapstringfloat64 if value == nil")
+				}
+			}
+
+			for _, colI := range mapStringFloat32Cols {
+				if row[colI] != nil {
+					row[colI], err = conn.convertToMapStringFloat32(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = map[string]float32{}
+					g.Debug("empty mapstringfloat32 if value == nil")
+				}
+			}
+
+			for _, colI := range mapStringArrayStringCols {
+				if row[colI] != nil {
+					row[colI], err = conn.convertToMapStringArrayString(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = map[string][]string{}
+					g.Debug("empty mapstringarraystring if value == nil")
+				}
+			}
+
+			for _, colI := range mapInt32StringCols {
+				if row[colI] != nil {
+					row[colI], err = conn.convertToMapInt32String(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = map[int32]string{}
+					g.Debug("empty mapint32string if value == nil")
+				}
+			}
+
+			for _, colI := range mapInt64StringCols {
+				if row[colI] != nil {
+					row[colI], err = conn.convertToMapInt64String(row[colI])
+					eG.Capture(err)
+				} else {
+					row[colI] = map[int64]string{}
+					g.Debug("empty mapint64string if value == nil")
+				}
+			}
+
+			if err = eG.Err(); err != nil {
+				err = g.Error(err, "could not convert value for COPY into table %s", tableFName)
+				ds.Context.CaptureErr(err)
+				return err
+			}
+
+			// Do insert
+			ds.Context.Lock()
+			err = batched.Append(row...)
+			ds.Context.Unlock()
+			if err != nil {
+				ds.Context.CaptureErr(g.Error(err, "could not insert into table %s, row: %#v", tableFName, row))
+				return g.Error(err, "could not execute statement")
+			}
+			internalCount++
+		}
+		err = batched.Send()
+		if err != nil {
+			return g.Error(err, "could not send batch data")
+		}
+
+		err = conn.Commit()
+		if err != nil {
+			return g.Error(err, "could not commit transaction")
+		}
+
+		// Update count only after successful commit
+		*count += internalCount
+		return nil
 	}
 
-	err = conn.Commit()
-	if err != nil {
-		return g.Error(err, "could not commit transaction")
-	}
-
-	*count += internalCount
-	return nil
+	return backoff.RetryNotify(operation,
+		conn.retryBackoff,
+		func(err error, duration time.Duration) {
+			g.Warn("Batch %d failed, retrying in %v: %v", batchCount, duration, err)
+		})
 }
 
 // ExecContext runs a sql query with context, returns `error`
