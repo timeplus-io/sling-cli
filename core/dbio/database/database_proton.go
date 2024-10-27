@@ -115,8 +115,6 @@ func (conn *ProtonConn) Init() error {
 	conn.retryBackoff = backoff.NewExponentialBackOff()
 	conn.retryBackoff.MaxElapsedTime = 5 * time.Minute
 	conn.retryBackoff.InitialInterval = 1 * time.Second
-	conn.retryBackoff.MaxInterval = 10 * time.Second
-	conn.retryBackoff.Multiplier = 2.0
 	return conn.BaseConn.Init()
 }
 
@@ -262,24 +260,36 @@ func (conn *ProtonConn) BulkImportStream(tableFName string, ds *iop.Datastream) 
 
 // processBatch handles the processing of a single batch
 func (conn *ProtonConn) processBatch(tableFName string, table Table, batch *iop.Batch, columns iop.Columns, batchCount int, count *uint64, ds *iop.Datastream) error {
-	// Generate idempotent ID once for all retries
+	batchRows := make([][]any, 0, batch.Count)
+	for row := range batch.Rows {
+		batchRows = append(batchRows, row)
+	}
+
 	idPrefix := fmt.Sprintf("%d_%d_batch_%s",
-		time.Now().UnixNano(), // Unique timestamp
-		batchCount,            // Batch number
-		table.FullName())      // Table name for uniqueness
+		time.Now().UnixNano(),
+		batchCount,
+		table.FullName())
 	conn.SetIdempotent(true, idPrefix)
 
 	operation := func() error {
-		// Start fresh transaction
+		// Check context cancellation
+		select {
+		case <-ds.Context.Ctx.Done():
+			return backoff.Permanent(g.Error(ds.Context.Ctx.Err(), "context cancelled"))
+		default:
+		}
+
+		var err error
 		if conn.Tx() == nil {
-			err := conn.Begin(&sql.TxOptions{Isolation: sql.LevelDefault})
+			err = conn.Begin(&sql.TxOptions{Isolation: sql.LevelDefault})
 			if err != nil {
 				return backoff.Permanent(g.Error(err, "could not begin transaction"))
 			}
-			var opErr error
 			defer func() {
-				if opErr != nil {
-					conn.Rollback()
+				if err != nil {
+					if rollbackErr := conn.Rollback(); rollbackErr != nil {
+						g.Warn("Failed to rollback transaction: %v", rollbackErr)
+					}
 				}
 			}()
 		}
@@ -440,7 +450,7 @@ func (conn *ProtonConn) processBatch(tableFName string, table Table, batch *iop.
 
 		// Counter for successfully inserts within this batch
 		var internalCount uint64
-		for row := range batch.Rows {
+		for _, row := range batchRows {
 			var eG g.ErrorGroup
 
 			// set decimals correctly
@@ -825,7 +835,7 @@ func (conn *ProtonConn) processBatch(tableFName string, table Table, batch *iop.
 			if err = eG.Err(); err != nil {
 				err = g.Error(err, "could not convert value for COPY into table %s", tableFName)
 				ds.Context.CaptureErr(err)
-				return err
+				return backoff.Permanent(err) // Type conversion errors are permanent
 			}
 
 			// Do insert
@@ -834,10 +844,11 @@ func (conn *ProtonConn) processBatch(tableFName string, table Table, batch *iop.
 			ds.Context.Unlock()
 			if err != nil {
 				ds.Context.CaptureErr(g.Error(err, "could not insert into table %s, row: %#v", tableFName, row))
-				return g.Error(err, "could not execute statement")
+				return g.Error(err, "could not execute statement") // Network/temporary errors can retry
 			}
 			internalCount++
 		}
+
 		err = batched.Send()
 		if err != nil {
 			return g.Error(err, "could not send batch data")
