@@ -857,7 +857,6 @@ func (conn *ProtonConn) processBatch(tableFName string, table Table, batch *iop.
 			return g.Error(err, "could not commit transaction")
 		}
 
-		// Update count only after successful commit
 		*count += internalCount
 		return nil
 	}
