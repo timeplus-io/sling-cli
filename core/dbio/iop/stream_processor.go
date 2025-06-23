@@ -175,6 +175,7 @@ func NewStreamProcessor() *StreamProcessor {
 		"2006-01-02 15:04:05-07",        // duckdb
 		"2006-01-02 15:04:05.000-07",    // duckdb
 		"2006-01-02 15:04:05.000000-07", // duckdb
+		"2006-01-02 15:04:05.000000+07", // timezone with + sign
 		time.RFC3339,
 		"2006-01-02T15:04:05",  // iso8601 without timezone
 		"2006-01-02T15:04:05Z", // iso8601 with timezone
