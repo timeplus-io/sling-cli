@@ -198,7 +198,7 @@ func (cfg *Config) SetDefault() {
 		cfg.Source.Options.MaxDecimals = g.Int(11)
 		cfg.Target.Options.MaxDecimals = g.Int(11)
 		if cfg.Target.Options.BatchLimit == nil {
-			cfg.Target.Options.BatchLimit = g.Int64(50000)
+			cfg.Target.Options.BatchLimit = g.Int64(5000)
 		}
 	}
 
