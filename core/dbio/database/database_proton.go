@@ -28,42 +28,78 @@ const (
 )
 
 var protonDataTypeMap = map[string]string{
-	"int8":    "int8",
-	"int16":   "int16",
-	"int32":   "int32",
-	"int64":   "int64",
-	"uint8":   "uint8",
-	"uint16":  "uint16",
-	"uint32":  "uint32",
-	"uint64":  "uint64",
+	// Basic integer types
+	"int8":   "int8",
+	"int16":  "int16",
+	"int32":  "int32",
+	"int64":  "int64",
+	"uint8":  "uint8",
+	"uint16": "uint16",
+	"uint32": "uint32",
+	"uint64": "uint64",
+
+	// Floating point types
 	"float32": "float32",
 	"float64": "float64",
+
+	// String and boolean types
 	"string":  "string",
 	"bool":    "bool",
+	"boolean": "bool", // alias
+
+	// Decimal types for precise calculations
+	"decimal":       "decimal",
+	"decimal32":     "decimal32",
+	"decimal64":     "decimal64",
+	"decimal128":    "decimal128",
+	"decimal256":    "decimal256",
+	"decimal(9,2)":  "decimal32",  // Common precision
+	"decimal(18,4)": "decimal64",  // Higher precision
+	"decimal(38,8)": "decimal128", // Very high precision
+	"numeric":       "decimal",    // PostgreSQL compatibility
+	"money":         "decimal64",  // Money type alias
+
+	// Date/Time types for temporal data
+	"date":          "date",
+	"date32":        "date32",
+	"datetime":      "datetime",
+	"datetime64":    "datetime64",
+	"datetime64(3)": "datetime64", // Millisecond precision
+	"datetime64(6)": "datetime64", // Microsecond precision
+	"timestamp":     "datetime64", // Common alias
+
+	// UUID type for unique identifiers
+	"uuid": "uuid",
 
 	// Map types
-	"map(string, string)":        "map(string, string)",
-	"map(string, int32)":         "map(string, int32)",
-	"map(string, int64)":         "map(string, int64)",
-	"map(string, float64)":       "map(string, float64)",
-	"map(string, array(string))": "map(string, array(string))",
-	"map(int32, string)":         "map(int32, string)",
-	"map(int64, string)":         "map(int64, string)",
+	"map(string, string)":         "map(string, string)",
+	"map(string, int32)":          "map(string, int32)",
+	"map(string, int64)":          "map(string, int64)",
+	"map(string, float64)":        "map(string, float64)",
+	"map(string, array(string))":  "map(string, array(string))",
+	"map(string, array(float32))": "map(string, array(float32))",
+	"map(int32, string)":          "map(int32, string)",
+	"map(int64, string)":          "map(int64, string)",
 
 	// Array types
-	"array(int8)":    "array(int8)",
-	"array(int16)":   "array(int16)",
-	"array(int32)":   "array(int32)",
-	"array(int64)":   "array(int64)",
-	"array(uint8)":   "array(uint8)",
-	"array(uint16)":  "array(uint16)",
-	"array(uint32)":  "array(uint32)",
-	"array(uint64)":  "array(uint64)",
-	"array(float32)": "array(float32)",
-	"array(float64)": "array(float64)",
-	"array(string)":  "array(string)",
-	"array(bool)":    "array(bool)",
-	"array(boolean)": "array(boolean)",
+	"array(int8)":       "array(int8)",
+	"array(int16)":      "array(int16)",
+	"array(int32)":      "array(int32)",
+	"array(int64)":      "array(int64)",
+	"array(uint8)":      "array(uint8)",
+	"array(uint16)":     "array(uint16)",
+	"array(uint32)":     "array(uint32)",
+	"array(uint64)":     "array(uint64)",
+	"array(float32)":    "array(float32)",
+	"array(float64)":    "array(float64)",
+	"array(string)":     "array(string)",
+	"array(bool)":       "array(bool)",
+	"array(boolean)":    "array(bool)",
+	"array(decimal32)":  "array(decimal32)",  // Decimal arrays
+	"array(decimal64)":  "array(decimal64)",  // Decimal arrays
+	"array(date)":       "array(date)",       // Date arrays
+	"array(datetime64)": "array(datetime64)", // Timestamp arrays
+	"array(uuid)":       "array(uuid)",       // UUID arrays
 }
 
 // ProtonConn is a Proton connection
@@ -310,488 +346,25 @@ func (conn *ProtonConn) processBatch(tableFName string, table Table, batch *iop.
 			return g.Error(err, "could not prepare statement for table: %s, statement: %s", table.FullName(), insertStatement)
 		}
 
-		decimalCols := []int{}
-		intCols := []int{}
-		int8Cols := []int{}
-		int16Cols := []int{}
-		int32Cols := []int{}
-		int64Cols := []int{}
-		uint8Cols := []int{}
-		uint16Cols := []int{}
-		uint32Cols := []int{}
-		uint64Cols := []int{}
-		float32Cols := []int{}
-		float64Cols := []int{}
-		floatCols := []int{}
-		stringCols := []int{}
-		booleanCols := []int{}
-
-		// Array types
-		arrayStringCols := []int{}
-		arrayBooleanCols := []int{}
-		arrayInt8Cols := []int{}
-		arrayInt16Cols := []int{}
-		arrayInt32Cols := []int{}
-		arrayInt64Cols := []int{}
-		arrayUint8Cols := []int{}
-		arrayUint16Cols := []int{}
-		arrayUint32Cols := []int{}
-		arrayUint64Cols := []int{}
-		arrayFloat32Cols := []int{}
-		arrayFloat64Cols := []int{}
-
-		// Map types
-		mapStringStringCols := []int{}
-		mapStringInt32Cols := []int{}
-		mapStringInt64Cols := []int{}
-		mapStringUint32Cols := []int{}
-		mapStringUint64Cols := []int{}
-		mapStringFloat64Cols := []int{}
-		mapStringFloat32Cols := []int{}
-		mapStringArrayStringCols := []int{}
-		mapInt32StringCols := []int{}
-		mapInt64StringCols := []int{}
-
-		for i, col := range batch.Columns {
-			dbType := strings.ToLower(col.DbType)
-			if strings.HasPrefix(dbType, "nullable(") {
-				dbType = strings.TrimPrefix(dbType, "nullable(")
-				dbType = strings.TrimSuffix(dbType, ")")
-			}
-			if strings.HasPrefix(dbType, "low_cardinality(") {
-				dbType = strings.TrimPrefix(dbType, "low_cardinality(")
-				dbType = strings.TrimSuffix(dbType, ")")
-			}
-
-			switch dbType {
-			case "int8":
-				int8Cols = append(int8Cols, i)
-			case "int16":
-				int16Cols = append(int16Cols, i)
-			case "int32":
-				int32Cols = append(int32Cols, i)
-			case "int64":
-				int64Cols = append(int64Cols, i)
-			case "uint8":
-				uint8Cols = append(uint8Cols, i)
-			case "uint16":
-				uint16Cols = append(uint16Cols, i)
-			case "uint32":
-				uint32Cols = append(uint32Cols, i)
-			case "uint64":
-				uint64Cols = append(uint64Cols, i)
-			case "float32":
-				float32Cols = append(float32Cols, i)
-			case "float64":
-				float64Cols = append(float64Cols, i)
-			case "string":
-				stringCols = append(stringCols, i)
-			case "bool":
-				booleanCols = append(booleanCols, i)
-			case "array(string)":
-				arrayStringCols = append(arrayStringCols, i)
-			case "array(bool)", "array(boolean)":
-				arrayBooleanCols = append(arrayBooleanCols, i)
-			case "array(int64)":
-				arrayInt64Cols = append(arrayInt64Cols, i)
-			case "array(int32)":
-				arrayInt32Cols = append(arrayInt32Cols, i)
-			case "array(int16)":
-				arrayInt16Cols = append(arrayInt16Cols, i)
-			case "array(int8)":
-				arrayInt8Cols = append(arrayInt8Cols, i)
-			case "array(uint64)":
-				arrayUint64Cols = append(arrayUint64Cols, i)
-			case "array(uint32)":
-				arrayUint32Cols = append(arrayUint32Cols, i)
-			case "array(uint16)":
-				arrayUint16Cols = append(arrayUint16Cols, i)
-			case "array(uint8)":
-				arrayUint8Cols = append(arrayUint8Cols, i)
-			case "array(float32)":
-				arrayFloat32Cols = append(arrayFloat32Cols, i)
-			case "array(float64)":
-				arrayFloat64Cols = append(arrayFloat64Cols, i)
-			case "map(string, string)":
-				mapStringStringCols = append(mapStringStringCols, i)
-			case "map(string, int32)":
-				mapStringInt32Cols = append(mapStringInt32Cols, i)
-			case "map(string, int64)":
-				mapStringInt64Cols = append(mapStringInt64Cols, i)
-			case "map(string, uint32)":
-				mapStringUint32Cols = append(mapStringUint32Cols, i)
-			case "map(string, uint64)":
-				mapStringUint64Cols = append(mapStringUint64Cols, i)
-			case "map(string, float64)":
-				mapStringFloat64Cols = append(mapStringFloat64Cols, i)
-			case "map(string, float32)":
-				mapStringFloat32Cols = append(mapStringFloat32Cols, i)
-			case "map(string, array(string))":
-				mapStringArrayStringCols = append(mapStringArrayStringCols, i)
-			case "map(int32, string)":
-				mapInt32StringCols = append(mapInt32StringCols, i)
-			case "map(int64, string)":
-				mapInt64StringCols = append(mapInt64StringCols, i)
-
-			default:
-				// Fall back to col.Type if DbType is not recognized
-				switch {
-				case col.Type == iop.DecimalType:
-					decimalCols = append(decimalCols, i)
-				case col.Type == iop.SmallIntType:
-					intCols = append(intCols, i)
-				case col.Type.IsInteger():
-					int64Cols = append(int64Cols, i)
-				case col.Type == iop.FloatType:
-					floatCols = append(floatCols, i)
-				}
-			}
-		}
+		// Build column converters based on column types
+		columnConverters := conn.buildColumnConverters(batch.Columns)
 
 		// Counter for successfully inserts within this batch
 		var internalCount uint64
 		for _, row := range batchRows {
 			var eG g.ErrorGroup
 
-			// set decimals correctly
-			for _, colI := range decimalCols {
-				if row[colI] != nil {
-					val, err := decimal.NewFromString(cast.ToString(row[colI]))
-					if err == nil {
-						row[colI] = val
+			// Apply all column conversions
+			for colIndex, converter := range columnConverters {
+				if row[colIndex] != nil {
+					convertedValue, convertErr := converter.Convert(row[colIndex])
+					if convertErr != nil {
+						eG.Capture(g.Error(convertErr, "failed to convert column %d (%s)", colIndex, converter.TypeName))
+					} else {
+						row[colIndex] = convertedValue
 					}
-					eG.Capture(err)
 				} else {
-					g.Debug("decimal if value == nil")
-				}
-			}
-
-			for _, colI := range booleanCols {
-				if row[colI] != nil {
-					row[colI], err = cast.ToBoolE(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("boolean if value == nil")
-				}
-			}
-
-			for _, colI := range stringCols {
-				if row[colI] != nil {
-					row[colI], err = cast.ToStringE(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("string if value == nil")
-				}
-			}
-
-			for _, colI := range int8Cols {
-				if row[colI] != nil {
-					row[colI], err = cast.ToInt8E(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("int8 if value == nil")
-				}
-			}
-
-			for _, colI := range int16Cols {
-				if row[colI] != nil {
-					row[colI], err = cast.ToInt16E(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("int16 if value == nil")
-				}
-			}
-
-			for _, colI := range int32Cols {
-				if row[colI] != nil {
-					row[colI], err = cast.ToInt32E(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("int32 if value == nil")
-				}
-			}
-
-			// set Int32 correctly
-			for _, colI := range intCols {
-				if row[colI] != nil {
-					row[colI], err = cast.ToIntE(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("int if value == nil")
-				}
-			}
-
-			// set Int64 correctly
-			for _, colI := range int64Cols {
-				if row[colI] != nil {
-					row[colI], err = cast.ToInt64E(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("int64 if value == nil")
-				}
-			}
-
-			for _, colI := range uint8Cols {
-				if row[colI] != nil {
-					row[colI], err = cast.ToUint8E(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("uint8 if value == nil")
-				}
-			}
-
-			for _, colI := range uint16Cols {
-				if row[colI] != nil {
-					row[colI], err = cast.ToUint16E(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("uint16 if value == nil")
-				}
-			}
-
-			// set Int32 correctly
-			for _, colI := range uint32Cols {
-				if row[colI] != nil {
-					row[colI], err = cast.ToUint32E(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("uint32 if value == nil")
-				}
-			}
-
-			// set Int64 correctly
-			for _, colI := range uint64Cols {
-				if row[colI] != nil {
-					row[colI], err = cast.ToUint64E(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("uint64 if value == nil")
-				}
-			}
-
-			// set Float64 correctly
-			for _, colI := range floatCols {
-				if row[colI] != nil {
-					row[colI], err = cast.ToFloat64E(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("float64 if value == nil")
-				}
-			}
-
-			for _, colI := range float32Cols {
-				if row[colI] != nil {
-					row[colI], err = cast.ToFloat32E(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("float32 if value == nil")
-				}
-			}
-
-			for _, colI := range float64Cols {
-				if row[colI] != nil {
-					row[colI], err = cast.ToFloat64E(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("float64 if value == nil")
-				}
-			}
-
-			for _, colI := range arrayStringCols {
-				if row[colI] != nil {
-					row[colI], err = conn.convertToArrayString(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("empty arraystring if value == nil")
-				}
-			}
-
-			for _, colI := range arrayBooleanCols {
-				if row[colI] != nil {
-					row[colI], err = conn.convertToArrayBool(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("empty arrayboolean if value == nil")
-				}
-			}
-
-			for _, colI := range arrayInt8Cols {
-				if row[colI] != nil {
-					row[colI], err = conn.convertToArrayInt8(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("empty arrayint8 if value == nil")
-				}
-			}
-
-			for _, colI := range arrayInt16Cols {
-				if row[colI] != nil {
-					row[colI], err = conn.convertToArrayInt16(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("empty arrayint16 if value == nil")
-				}
-			}
-
-			for _, colI := range arrayInt32Cols {
-				if row[colI] != nil {
-					row[colI], err = conn.convertToArrayInt32(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("empty arrayint32 if value == nil")
-				}
-			}
-
-			for _, colI := range arrayInt64Cols {
-				if row[colI] != nil {
-					row[colI], err = conn.convertToArrayInt64(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("empty arrayint64 if value == nil")
-				}
-			}
-
-			for _, colI := range arrayUint8Cols {
-				if row[colI] != nil {
-					row[colI], err = conn.convertToArrayUint8(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("empty arrayuint8 if value == nil")
-				}
-			}
-
-			for _, colI := range arrayUint16Cols {
-				if row[colI] != nil {
-					row[colI], err = conn.convertToArrayUint16(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("empty arrayuint16 if value == nil")
-				}
-			}
-
-			for _, colI := range arrayUint32Cols {
-				if row[colI] != nil {
-					row[colI], err = conn.convertToArrayUint32(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("empty arrayuint32 if value == nil")
-				}
-			}
-
-			for _, colI := range arrayUint64Cols {
-				if row[colI] != nil {
-					row[colI], err = conn.convertToArrayUint64(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("empty arrayuint64 if value == nil")
-				}
-			}
-
-			for _, colI := range arrayFloat32Cols {
-				if row[colI] != nil {
-					row[colI], err = conn.convertToArrayFloat32(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("empty arrayfloat32 if value == nil")
-				}
-			}
-
-			for _, colI := range arrayFloat64Cols {
-				if row[colI] != nil {
-					row[colI], err = conn.convertToArrayFloat64(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("empty arrayfloat64 if value == nil")
-				}
-			}
-
-			for _, colI := range mapStringStringCols {
-				if row[colI] != nil {
-					row[colI], err = conn.convertToMapStringString(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("empty mapstringstring if value == nil")
-				}
-			}
-
-			for _, colI := range mapStringInt32Cols {
-				if row[colI] != nil {
-					row[colI], err = conn.convertToMapStringInt32(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("empty mapstringint32 if value == nil")
-				}
-			}
-
-			for _, colI := range mapStringInt64Cols {
-				if row[colI] != nil {
-					row[colI], err = conn.convertToMapStringInt64(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("empty mapstringint64 if value == nil")
-				}
-			}
-
-			for _, colI := range mapStringUint32Cols {
-				if row[colI] != nil {
-					row[colI], err = conn.convertToMapStringUint32(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("empty mapstringuint32 if value == nil")
-				}
-			}
-
-			for _, colI := range mapStringUint64Cols {
-				if row[colI] != nil {
-					row[colI], err = conn.convertToMapStringUint64(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("empty mapstringuint64 if value == nil")
-				}
-			}
-
-			for _, colI := range mapStringFloat64Cols {
-				if row[colI] != nil {
-					row[colI], err = conn.convertToMapStringFloat64(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("empty mapstringfloat64 if value == nil")
-				}
-			}
-
-			for _, colI := range mapStringFloat32Cols {
-				if row[colI] != nil {
-					row[colI], err = conn.convertToMapStringFloat32(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("empty mapstringfloat32 if value == nil")
-				}
-			}
-
-			for _, colI := range mapStringArrayStringCols {
-				if row[colI] != nil {
-					row[colI], err = conn.convertToMapStringArrayString(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("empty mapstringarraystring if value == nil")
-				}
-			}
-
-			for _, colI := range mapInt32StringCols {
-				if row[colI] != nil {
-					row[colI], err = conn.convertToMapInt32String(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("empty mapint32string if value == nil")
-				}
-			}
-
-			for _, colI := range mapInt64StringCols {
-				if row[colI] != nil {
-					row[colI], err = conn.convertToMapInt64String(row[colI])
-					eG.Capture(err)
-				} else {
-					g.Debug("empty mapint64string if value == nil")
+					g.Debug("%s column %d value == nil", converter.TypeName, colIndex)
 				}
 			}
 
@@ -832,6 +405,338 @@ func (conn *ProtonConn) processBatch(tableFName string, table Table, batch *iop.
 		func(err error, duration time.Duration) {
 			g.Warn("Batch %d failed, retrying in %v: %v", batchCount, duration, err)
 		})
+}
+
+// ColumnConverter defines how to convert a column value
+type ColumnConverter struct {
+	TypeName string
+	Convert  func(value interface{}) (interface{}, error)
+}
+
+// buildColumnConverters creates a map of column converters based on column types
+func (conn *ProtonConn) buildColumnConverters(columns iop.Columns) map[int]ColumnConverter {
+	converters := make(map[int]ColumnConverter)
+
+	for i, col := range columns {
+		originalDbType := strings.ToLower(col.DbType)
+		dbType := originalDbType
+
+		// First, check for exact matches with nested nullable types (before wrapper stripping)
+		switch originalDbType {
+		// Array with nullable elements - these require pointer slices
+		case "array(nullable(int8))":
+			converters[i] = ColumnConverter{"array(nullable(int8))", func(v interface{}) (interface{}, error) {
+				return conn.convertToArrayNullableInt8(v)
+			}}
+			continue
+		case "array(nullable(int16))":
+			converters[i] = ColumnConverter{"array(nullable(int16))", func(v interface{}) (interface{}, error) {
+				return conn.convertToArrayNullableInt16(v)
+			}}
+			continue
+		case "array(nullable(int32))":
+			converters[i] = ColumnConverter{"array(nullable(int32))", func(v interface{}) (interface{}, error) {
+				return conn.convertToArrayNullableInt32(v)
+			}}
+			continue
+		case "array(nullable(int64))":
+			converters[i] = ColumnConverter{"array(nullable(int64))", func(v interface{}) (interface{}, error) {
+				return conn.convertToArrayNullableInt64(v)
+			}}
+			continue
+		case "array(nullable(uint8))":
+			converters[i] = ColumnConverter{"array(nullable(uint8))", func(v interface{}) (interface{}, error) {
+				return conn.convertToArrayNullableUint8(v)
+			}}
+			continue
+		case "array(nullable(uint16))":
+			converters[i] = ColumnConverter{"array(nullable(uint16))", func(v interface{}) (interface{}, error) {
+				return conn.convertToArrayNullableUint16(v)
+			}}
+			continue
+		case "array(nullable(uint32))":
+			converters[i] = ColumnConverter{"array(nullable(uint32))", func(v interface{}) (interface{}, error) {
+				return conn.convertToArrayNullableUint32(v)
+			}}
+			continue
+		case "array(nullable(uint64))":
+			converters[i] = ColumnConverter{"array(nullable(uint64))", func(v interface{}) (interface{}, error) {
+				return conn.convertToArrayNullableUint64(v)
+			}}
+			continue
+		case "array(nullable(float32))":
+			converters[i] = ColumnConverter{"array(nullable(float32))", func(v interface{}) (interface{}, error) {
+				return conn.convertToArrayNullableFloat32(v)
+			}}
+			continue
+		case "array(nullable(float64))":
+			converters[i] = ColumnConverter{"array(nullable(float64))", func(v interface{}) (interface{}, error) {
+				return conn.convertToArrayNullableFloat64(v)
+			}}
+			continue
+		case "array(nullable(string))":
+			converters[i] = ColumnConverter{"array(nullable(string))", func(v interface{}) (interface{}, error) {
+				return conn.convertToArrayNullableString(v)
+			}}
+			continue
+		case "array(nullable(bool))", "array(nullable(boolean))":
+			converters[i] = ColumnConverter{"array(nullable(bool))", func(v interface{}) (interface{}, error) {
+				return conn.convertToArrayNullableBool(v)
+			}}
+			continue
+		}
+
+		// Handle nested wrappers (nullable, low_cardinality) - may be nested
+		for {
+			changed := false
+			if strings.HasPrefix(dbType, "nullable(") {
+				dbType = strings.TrimPrefix(dbType, "nullable(")
+				dbType = strings.TrimSuffix(dbType, ")")
+				changed = true
+			}
+			if strings.HasPrefix(dbType, "low_cardinality(") {
+				dbType = strings.TrimPrefix(dbType, "low_cardinality(")
+				dbType = strings.TrimSuffix(dbType, ")")
+				changed = true
+			}
+			if !changed {
+				break
+			}
+		}
+
+		// Handle precision specifications for datetime and decimal types
+		if strings.HasPrefix(dbType, "datetime64(") && strings.HasSuffix(dbType, ")") {
+			dbType = "datetime64" // Strip precision, treat as datetime64
+		}
+		if strings.HasPrefix(dbType, "decimal(") && strings.HasSuffix(dbType, ")") {
+			// For decimal(P,S), map to appropriate decimal type based on precision
+			if strings.Contains(dbType, ",") {
+				dbType = "decimal64" // Default to decimal64 for explicit precision
+			} else {
+				dbType = "decimal" // For decimal(P) without scale
+			}
+		}
+
+		// Map database types to converters
+		switch dbType {
+		// Basic integer types
+		case "int8":
+			converters[i] = ColumnConverter{"int8", func(v interface{}) (interface{}, error) {
+				return cast.ToInt8E(v)
+			}}
+		case "int16":
+			converters[i] = ColumnConverter{"int16", func(v interface{}) (interface{}, error) {
+				return cast.ToInt16E(v)
+			}}
+		case "int32":
+			converters[i] = ColumnConverter{"int32", func(v interface{}) (interface{}, error) {
+				return cast.ToInt32E(v)
+			}}
+		case "int64":
+			converters[i] = ColumnConverter{"int64", func(v interface{}) (interface{}, error) {
+				return cast.ToInt64E(v)
+			}}
+
+		// Unsigned integer types
+		case "uint8":
+			converters[i] = ColumnConverter{"uint8", func(v interface{}) (interface{}, error) {
+				return cast.ToUint8E(v)
+			}}
+		case "uint16":
+			converters[i] = ColumnConverter{"uint16", func(v interface{}) (interface{}, error) {
+				return cast.ToUint16E(v)
+			}}
+		case "uint32":
+			converters[i] = ColumnConverter{"uint32", func(v interface{}) (interface{}, error) {
+				return cast.ToUint32E(v)
+			}}
+		case "uint64":
+			converters[i] = ColumnConverter{"uint64", func(v interface{}) (interface{}, error) {
+				return cast.ToUint64E(v)
+			}}
+
+		// Float types
+		case "float32":
+			converters[i] = ColumnConverter{"float32", func(v interface{}) (interface{}, error) {
+				return cast.ToFloat32E(v)
+			}}
+		case "float64":
+			converters[i] = ColumnConverter{"float64", func(v interface{}) (interface{}, error) {
+				return cast.ToFloat64E(v)
+			}}
+
+		// String and boolean types
+		case "string":
+			converters[i] = ColumnConverter{"string", func(v interface{}) (interface{}, error) {
+				return cast.ToStringE(v)
+			}}
+		case "bool", "boolean":
+			converters[i] = ColumnConverter{"bool", func(v interface{}) (interface{}, error) {
+				return cast.ToBoolE(v)
+			}}
+
+		// Array types
+		case "array(string)":
+			converters[i] = ColumnConverter{"array(string)", func(v interface{}) (interface{}, error) {
+				return conn.convertToArrayString(v)
+			}}
+		case "array(bool)", "array(boolean)":
+			converters[i] = ColumnConverter{"array(bool)", func(v interface{}) (interface{}, error) {
+				return conn.convertToArrayBool(v)
+			}}
+		case "array(int8)":
+			converters[i] = ColumnConverter{"array(int8)", func(v interface{}) (interface{}, error) {
+				return conn.convertToArrayInt8(v)
+			}}
+		case "array(int16)":
+			converters[i] = ColumnConverter{"array(int16)", func(v interface{}) (interface{}, error) {
+				return conn.convertToArrayInt16(v)
+			}}
+		case "array(int32)":
+			converters[i] = ColumnConverter{"array(int32)", func(v interface{}) (interface{}, error) {
+				return conn.convertToArrayInt32(v)
+			}}
+		case "array(int64)":
+			converters[i] = ColumnConverter{"array(int64)", func(v interface{}) (interface{}, error) {
+				return conn.convertToArrayInt64(v)
+			}}
+		case "array(uint8)":
+			converters[i] = ColumnConverter{"array(uint8)", func(v interface{}) (interface{}, error) {
+				return conn.convertToArrayUint8(v)
+			}}
+		case "array(uint16)":
+			converters[i] = ColumnConverter{"array(uint16)", func(v interface{}) (interface{}, error) {
+				return conn.convertToArrayUint16(v)
+			}}
+		case "array(uint32)":
+			converters[i] = ColumnConverter{"array(uint32)", func(v interface{}) (interface{}, error) {
+				return conn.convertToArrayUint32(v)
+			}}
+		case "array(uint64)":
+			converters[i] = ColumnConverter{"array(uint64)", func(v interface{}) (interface{}, error) {
+				return conn.convertToArrayUint64(v)
+			}}
+		case "array(float32)":
+			converters[i] = ColumnConverter{"array(float32)", func(v interface{}) (interface{}, error) {
+				return conn.convertToArrayFloat32(v)
+			}}
+		case "array(float64)":
+			converters[i] = ColumnConverter{"array(float64)", func(v interface{}) (interface{}, error) {
+				return conn.convertToArrayFloat64(v)
+			}}
+
+		// Map types
+		case "map(string, string)":
+			converters[i] = ColumnConverter{"map(string, string)", func(v interface{}) (interface{}, error) {
+				return conn.convertToMapStringString(v)
+			}}
+		case "map(string, int32)":
+			converters[i] = ColumnConverter{"map(string, int32)", func(v interface{}) (interface{}, error) {
+				return conn.convertToMapStringInt32(v)
+			}}
+		case "map(string, int64)":
+			converters[i] = ColumnConverter{"map(string, int64)", func(v interface{}) (interface{}, error) {
+				return conn.convertToMapStringInt64(v)
+			}}
+		case "map(string, uint32)":
+			converters[i] = ColumnConverter{"map(string, uint32)", func(v interface{}) (interface{}, error) {
+				return conn.convertToMapStringUint32(v)
+			}}
+		case "map(string, uint64)":
+			converters[i] = ColumnConverter{"map(string, uint64)", func(v interface{}) (interface{}, error) {
+				return conn.convertToMapStringUint64(v)
+			}}
+		case "map(string, float32)":
+			converters[i] = ColumnConverter{"map(string, float32)", func(v interface{}) (interface{}, error) {
+				return conn.convertToMapStringFloat32(v)
+			}}
+		case "map(string, float64)":
+			converters[i] = ColumnConverter{"map(string, float64)", func(v interface{}) (interface{}, error) {
+				return conn.convertToMapStringFloat64(v)
+			}}
+		case "map(string, array(string))":
+			converters[i] = ColumnConverter{"map(string, array(string))", func(v interface{}) (interface{}, error) {
+				return conn.convertToMapStringArrayString(v)
+			}}
+		case "map(string, array(float32))":
+			converters[i] = ColumnConverter{"map(string, array(float32))", func(v interface{}) (interface{}, error) {
+				return conn.convertToMapStringArrayFloat32(v)
+			}}
+		case "map(int32, string)":
+			converters[i] = ColumnConverter{"map(int32, string)", func(v interface{}) (interface{}, error) {
+				return conn.convertToMapInt32String(v)
+			}}
+		case "map(int64, string)":
+			converters[i] = ColumnConverter{"map(int64, string)", func(v interface{}) (interface{}, error) {
+				return conn.convertToMapInt64String(v)
+			}}
+
+		// Decimal types for precise calculations
+		case "decimal", "decimal32", "decimal64", "decimal128", "decimal256", "numeric", "money":
+			converters[i] = ColumnConverter{"decimal", func(v interface{}) (interface{}, error) {
+				val, err := decimal.NewFromString(cast.ToString(v))
+				return val, err
+			}}
+
+		// Date/Time types for temporal data
+		case "date", "date32":
+			converters[i] = ColumnConverter{"date", func(v interface{}) (interface{}, error) {
+				return cast.ToTimeE(v)
+			}}
+		case "datetime", "datetime64", "timestamp":
+			converters[i] = ColumnConverter{"datetime64", func(v interface{}) (interface{}, error) {
+				return cast.ToTimeE(v)
+			}}
+
+		// UUID type for unique identifiers
+		case "uuid":
+			converters[i] = ColumnConverter{"uuid", func(v interface{}) (interface{}, error) {
+				return cast.ToStringE(v) // UUIDs are typically handled as strings
+			}}
+
+		// Array types for analytical data
+		case "array(decimal32)", "array(decimal64)":
+			converters[i] = ColumnConverter{"array(decimal)", func(v interface{}) (interface{}, error) {
+				return conn.convertToArrayDecimal(v)
+			}}
+		case "array(date)":
+			converters[i] = ColumnConverter{"array(date)", func(v interface{}) (interface{}, error) {
+				return conn.convertToArrayDate(v)
+			}}
+		case "array(datetime64)":
+			converters[i] = ColumnConverter{"array(datetime64)", func(v interface{}) (interface{}, error) {
+				return conn.convertToArrayDateTime64(v)
+			}}
+		case "array(uuid)":
+			converters[i] = ColumnConverter{"array(uuid)", func(v interface{}) (interface{}, error) {
+				return conn.convertToArrayUUID(v)
+			}}
+
+		default:
+			// Fall back to col.Type if DbType is not recognized
+			switch {
+			case col.Type == iop.DecimalType:
+				converters[i] = ColumnConverter{"decimal", func(v interface{}) (interface{}, error) {
+					val, err := decimal.NewFromString(cast.ToString(v))
+					return val, err
+				}}
+			case col.Type == iop.SmallIntType:
+				converters[i] = ColumnConverter{"smallint", func(v interface{}) (interface{}, error) {
+					return cast.ToIntE(v)
+				}}
+			case col.Type.IsInteger():
+				converters[i] = ColumnConverter{"integer", func(v interface{}) (interface{}, error) {
+					return cast.ToInt64E(v)
+				}}
+			case col.Type == iop.FloatType:
+				converters[i] = ColumnConverter{"float", func(v interface{}) (interface{}, error) {
+					return cast.ToFloat64E(v)
+				}}
+			}
+		}
+	}
+
+	return converters
 }
 
 // ExecContext runs a sql query with context, returns `error`
@@ -1444,6 +1349,26 @@ func (conn *ProtonConn) convertToMapStringArrayString(value interface{}) (map[st
 	return result, nil
 }
 
+func (conn *ProtonConn) convertToMapStringArrayFloat32(value interface{}) (map[string][]float32, error) {
+
+	if value == "" {
+		return map[string][]float32{}, nil
+	}
+
+	str, ok := value.(string)
+	if !ok {
+		return nil, fmt.Errorf("expected string, got %T", value)
+	}
+
+	var result map[string][]float32
+	err := json.Unmarshal([]byte(str), &result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal map: %v", err)
+	}
+
+	return result, nil
+}
+
 func (conn *ProtonConn) convertToMapStringString(value interface{}) (map[string]string, error) {
 
 	if value == "" {
@@ -1459,6 +1384,461 @@ func (conn *ProtonConn) convertToMapStringString(value interface{}) (map[string]
 	err := json.Unmarshal([]byte(str), &result)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal map: %v", err)
+	}
+
+	return result, nil
+}
+
+// Decimal/Date/Time converter functions for analytical data
+
+func (conn *ProtonConn) convertToArrayDecimal(value interface{}) ([]decimal.Decimal, error) {
+	if value == "" {
+		return []decimal.Decimal{}, nil
+	}
+
+	str, ok := value.(string)
+	if !ok {
+		return nil, fmt.Errorf("expected string, got %T", value)
+	}
+
+	var stringResults []string
+	err := json.Unmarshal([]byte(str), &stringResults)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal array: %v", err)
+	}
+
+	results := make([]decimal.Decimal, len(stringResults))
+	for i, s := range stringResults {
+		dec, err := decimal.NewFromString(s)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse decimal %s: %v", s, err)
+		}
+		results[i] = dec
+	}
+
+	return results, nil
+}
+
+func (conn *ProtonConn) convertToArrayDate(value interface{}) ([]time.Time, error) {
+	if value == "" {
+		return []time.Time{}, nil
+	}
+
+	str, ok := value.(string)
+	if !ok {
+		return nil, fmt.Errorf("expected string, got %T", value)
+	}
+
+	var stringResults []string
+	err := json.Unmarshal([]byte(str), &stringResults)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal array: %v", err)
+	}
+
+	results := make([]time.Time, len(stringResults))
+	for i, s := range stringResults {
+		t, err := cast.ToTimeE(s)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse date %s: %v", s, err)
+		}
+		results[i] = t
+	}
+
+	return results, nil
+}
+
+func (conn *ProtonConn) convertToArrayDateTime64(value interface{}) ([]time.Time, error) {
+	if value == "" {
+		return []time.Time{}, nil
+	}
+
+	str, ok := value.(string)
+	if !ok {
+		return nil, fmt.Errorf("expected string, got %T", value)
+	}
+
+	var stringResults []string
+	err := json.Unmarshal([]byte(str), &stringResults)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal array: %v", err)
+	}
+
+	results := make([]time.Time, len(stringResults))
+	for i, s := range stringResults {
+		t, err := cast.ToTimeE(s)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse datetime %s: %v", s, err)
+		}
+		results[i] = t
+	}
+
+	return results, nil
+}
+
+func (conn *ProtonConn) convertToArrayUUID(value interface{}) ([]string, error) {
+	if value == "" {
+		return []string{}, nil
+	}
+
+	str, ok := value.(string)
+	if !ok {
+		return nil, fmt.Errorf("expected string, got %T", value)
+	}
+
+	var result []string
+	err := json.Unmarshal([]byte(str), &result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal array: %v", err)
+	}
+
+	return result, nil
+}
+
+// Array with nullable elements - these return pointer slices as required by Proton driver
+
+func (conn *ProtonConn) convertToArrayNullableInt8(value interface{}) ([]*int8, error) {
+	if value == "" {
+		return []*int8{}, nil
+	}
+
+	str, ok := value.(string)
+	if !ok {
+		return nil, fmt.Errorf("expected string, got %T", value)
+	}
+
+	var rawResult []interface{}
+	err := json.Unmarshal([]byte(str), &rawResult)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal array: %v", err)
+	}
+
+	result := make([]*int8, len(rawResult))
+	for i, v := range rawResult {
+		if v == nil {
+			result[i] = nil
+		} else {
+			val := cast.ToInt8(v)
+			result[i] = &val
+		}
+	}
+
+	return result, nil
+}
+
+func (conn *ProtonConn) convertToArrayNullableInt16(value interface{}) ([]*int16, error) {
+	if value == "" {
+		return []*int16{}, nil
+	}
+
+	str, ok := value.(string)
+	if !ok {
+		return nil, fmt.Errorf("expected string, got %T", value)
+	}
+
+	var rawResult []interface{}
+	err := json.Unmarshal([]byte(str), &rawResult)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal array: %v", err)
+	}
+
+	result := make([]*int16, len(rawResult))
+	for i, v := range rawResult {
+		if v == nil {
+			result[i] = nil
+		} else {
+			val := cast.ToInt16(v)
+			result[i] = &val
+		}
+	}
+
+	return result, nil
+}
+
+func (conn *ProtonConn) convertToArrayNullableInt32(value interface{}) ([]*int32, error) {
+	if value == "" {
+		return []*int32{}, nil
+	}
+
+	str, ok := value.(string)
+	if !ok {
+		return nil, fmt.Errorf("expected string, got %T", value)
+	}
+
+	var rawResult []interface{}
+	err := json.Unmarshal([]byte(str), &rawResult)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal array: %v", err)
+	}
+
+	result := make([]*int32, len(rawResult))
+	for i, v := range rawResult {
+		if v == nil {
+			result[i] = nil
+		} else {
+			val := cast.ToInt32(v)
+			result[i] = &val
+		}
+	}
+
+	return result, nil
+}
+
+func (conn *ProtonConn) convertToArrayNullableInt64(value interface{}) ([]*int64, error) {
+	if value == "" {
+		return []*int64{}, nil
+	}
+
+	str, ok := value.(string)
+	if !ok {
+		return nil, fmt.Errorf("expected string, got %T", value)
+	}
+
+	var rawResult []interface{}
+	err := json.Unmarshal([]byte(str), &rawResult)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal array: %v", err)
+	}
+
+	result := make([]*int64, len(rawResult))
+	for i, v := range rawResult {
+		if v == nil {
+			result[i] = nil
+		} else {
+			val := cast.ToInt64(v)
+			result[i] = &val
+		}
+	}
+
+	return result, nil
+}
+
+func (conn *ProtonConn) convertToArrayNullableUint8(value interface{}) ([]*uint8, error) {
+	if value == "" {
+		return []*uint8{}, nil
+	}
+
+	str, ok := value.(string)
+	if !ok {
+		return nil, fmt.Errorf("expected string, got %T", value)
+	}
+
+	var rawResult []interface{}
+	err := json.Unmarshal([]byte(str), &rawResult)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal array: %v", err)
+	}
+
+	result := make([]*uint8, len(rawResult))
+	for i, v := range rawResult {
+		if v == nil {
+			result[i] = nil
+		} else {
+			val := cast.ToUint8(v)
+			result[i] = &val
+		}
+	}
+
+	return result, nil
+}
+
+func (conn *ProtonConn) convertToArrayNullableUint16(value interface{}) ([]*uint16, error) {
+	if value == "" {
+		return []*uint16{}, nil
+	}
+
+	str, ok := value.(string)
+	if !ok {
+		return nil, fmt.Errorf("expected string, got %T", value)
+	}
+
+	var rawResult []interface{}
+	err := json.Unmarshal([]byte(str), &rawResult)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal array: %v", err)
+	}
+
+	result := make([]*uint16, len(rawResult))
+	for i, v := range rawResult {
+		if v == nil {
+			result[i] = nil
+		} else {
+			val := cast.ToUint16(v)
+			result[i] = &val
+		}
+	}
+
+	return result, nil
+}
+
+func (conn *ProtonConn) convertToArrayNullableUint32(value interface{}) ([]*uint32, error) {
+	if value == "" {
+		return []*uint32{}, nil
+	}
+
+	str, ok := value.(string)
+	if !ok {
+		return nil, fmt.Errorf("expected string, got %T", value)
+	}
+
+	var rawResult []interface{}
+	err := json.Unmarshal([]byte(str), &rawResult)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal array: %v", err)
+	}
+
+	result := make([]*uint32, len(rawResult))
+	for i, v := range rawResult {
+		if v == nil {
+			result[i] = nil
+		} else {
+			val := cast.ToUint32(v)
+			result[i] = &val
+		}
+	}
+
+	return result, nil
+}
+
+func (conn *ProtonConn) convertToArrayNullableUint64(value interface{}) ([]*uint64, error) {
+	if value == "" {
+		return []*uint64{}, nil
+	}
+
+	str, ok := value.(string)
+	if !ok {
+		return nil, fmt.Errorf("expected string, got %T", value)
+	}
+
+	var rawResult []interface{}
+	err := json.Unmarshal([]byte(str), &rawResult)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal array: %v", err)
+	}
+
+	result := make([]*uint64, len(rawResult))
+	for i, v := range rawResult {
+		if v == nil {
+			result[i] = nil
+		} else {
+			val := cast.ToUint64(v)
+			result[i] = &val
+		}
+	}
+
+	return result, nil
+}
+
+func (conn *ProtonConn) convertToArrayNullableFloat32(value interface{}) ([]*float32, error) {
+	if value == "" {
+		return []*float32{}, nil
+	}
+
+	str, ok := value.(string)
+	if !ok {
+		return nil, fmt.Errorf("expected string, got %T", value)
+	}
+
+	var rawResult []interface{}
+	err := json.Unmarshal([]byte(str), &rawResult)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal array: %v", err)
+	}
+
+	result := make([]*float32, len(rawResult))
+	for i, v := range rawResult {
+		if v == nil {
+			result[i] = nil
+		} else {
+			val := cast.ToFloat32(v)
+			result[i] = &val
+		}
+	}
+
+	return result, nil
+}
+
+func (conn *ProtonConn) convertToArrayNullableFloat64(value interface{}) ([]*float64, error) {
+	if value == "" {
+		return []*float64{}, nil
+	}
+
+	str, ok := value.(string)
+	if !ok {
+		return nil, fmt.Errorf("expected string, got %T", value)
+	}
+
+	var rawResult []interface{}
+	err := json.Unmarshal([]byte(str), &rawResult)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal array: %v", err)
+	}
+
+	result := make([]*float64, len(rawResult))
+	for i, v := range rawResult {
+		if v == nil {
+			result[i] = nil
+		} else {
+			val := cast.ToFloat64(v)
+			result[i] = &val
+		}
+	}
+
+	return result, nil
+}
+
+func (conn *ProtonConn) convertToArrayNullableString(value interface{}) ([]*string, error) {
+	if value == "" {
+		return []*string{}, nil
+	}
+
+	str, ok := value.(string)
+	if !ok {
+		return nil, fmt.Errorf("expected string, got %T", value)
+	}
+
+	var rawResult []interface{}
+	err := json.Unmarshal([]byte(str), &rawResult)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal array: %v", err)
+	}
+
+	result := make([]*string, len(rawResult))
+	for i, v := range rawResult {
+		if v == nil {
+			result[i] = nil
+		} else {
+			val := cast.ToString(v)
+			result[i] = &val
+		}
+	}
+
+	return result, nil
+}
+
+func (conn *ProtonConn) convertToArrayNullableBool(value interface{}) ([]*bool, error) {
+	if value == "" {
+		return []*bool{}, nil
+	}
+
+	str, ok := value.(string)
+	if !ok {
+		return nil, fmt.Errorf("expected string, got %T", value)
+	}
+
+	var rawResult []interface{}
+	err := json.Unmarshal([]byte(str), &rawResult)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal array: %v", err)
+	}
+
+	result := make([]*bool, len(rawResult))
+	for i, v := range rawResult {
+		if v == nil {
+			result[i] = nil
+		} else {
+			val := cast.ToBool(v)
+			result[i] = &val
+		}
 	}
 
 	return result, nil
