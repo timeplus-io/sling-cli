@@ -859,6 +859,12 @@ func (sp *StreamProcessor) CastToString(i int, val interface{}, valType ...Colum
 		if tVal.IsZero() {
 			return ""
 		} else if sp.Config.DatetimeFormat != "" && strings.ToLower(sp.Config.DatetimeFormat) != "auto" {
+			// If the configured format contains a timezone offset (+00, -07, etc.),
+			// we need to ensure the time is converted to UTC to avoid system timezone interference
+			if strings.Contains(sp.Config.DatetimeFormat, "+00") ||
+				strings.Contains(sp.Config.DatetimeFormat, "+0000") {
+				return tVal.UTC().Format(sp.Config.DatetimeFormat)
+			}
 			return tVal.Format(sp.Config.DatetimeFormat)
 		} else if tVal.Location() == nil {
 			return tVal.Format("2006-01-02 15:04:05.000000") + " +00"

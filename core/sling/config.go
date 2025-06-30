@@ -93,6 +93,47 @@ func NewConfig(cfgStr string) (cfg *Config, err error) {
 // SetDefault sets default options
 func (cfg *Config) SetDefault() {
 
+	// set Proton-specific datetime formats BEFORE applying defaults to prevent override
+	switch cfg.SrcConn.Type {
+	case dbio.TypeDbProton:
+		if cfg.Source.Options == nil {
+			cfg.Source.Options = &SourceOptions{}
+		}
+		if cfg.Source.Options.DatetimeFormat == "" {
+			cfg.Source.Options.DatetimeFormat = "2006-01-02 15:04:05.000000 +00"
+		}
+		// When source is Proton and target is FILE, also set target datetime format to UTC
+		// to avoid timezone conversion issues during CSV export
+		if cfg.TgtConn.Type.Kind() == dbio.KindFile {
+			if cfg.Target.Options == nil {
+				cfg.Target.Options = &TargetOptions{}
+			}
+			if cfg.Target.Options.DatetimeFormat == "" {
+				cfg.Target.Options.DatetimeFormat = "2006-01-02 15:04:05.000000 +00"
+			}
+		}
+	}
+
+	switch cfg.TgtConn.Type {
+	case dbio.TypeDbProton:
+		if cfg.Target.Options == nil {
+			cfg.Target.Options = &TargetOptions{}
+		}
+		if cfg.Target.Options.DatetimeFormat == "" {
+			cfg.Target.Options.DatetimeFormat = "2006-01-02 15:04:05.000000 +00"
+		}
+		// When target is Proton and source is FILE, also set source datetime format to UTC
+		// to ensure consistent datetime parsing from CSV files
+		if cfg.SrcConn.Type.Kind() == dbio.KindFile {
+			if cfg.Source.Options == nil {
+				cfg.Source.Options = &SourceOptions{}
+			}
+			if cfg.Source.Options.DatetimeFormat == "" {
+				cfg.Source.Options.DatetimeFormat = "2006-01-02 15:04:05.000000 +00"
+			}
+		}
+	}
+
 	// set source options
 	var sourceOptions SourceOptions
 	switch cfg.SrcConn.Type.Kind() {
