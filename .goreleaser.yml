@@ -1,3 +1,5 @@
+version: 2
+
 project_name: sling
 
 before:
@@ -24,8 +26,9 @@ builds:
 
 git:
   prerelease_suffix: "-rc"
+
 archives:
-  - format: zip
+  - formats: [ 'zip' ]
     name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
 
 checksum:
@@ -33,7 +36,7 @@ checksum:
   algorithm: sha256
 
 snapshot:
-  name_template: "{{ incpatch .Version }}-next"
+  version_template: "{{ incpatch .Version }}-next"
 
 changelog:
   sort: asc
