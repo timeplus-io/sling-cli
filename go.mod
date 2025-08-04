@@ -1,8 +1,8 @@
 module github.com/slingdata-io/sling-cli
 
-go 1.22
+go 1.24
 
-toolchain go1.22.5
+toolchain go1.24.5
 
 require (
 	cloud.google.com/go v0.115.0
