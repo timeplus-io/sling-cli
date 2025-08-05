@@ -573,6 +573,8 @@ func (fs *BaseFileSysClient) ReadDataflow(url string, cfg ...iop.FileStreamConfi
 			err = g.Error(err, "Error getting paths")
 			return
 		}
+
+		nodes.Sort()
 	}
 
 	df, err = GetDataflow(fs.Self(), nodes, Cfg)
@@ -1180,26 +1182,8 @@ func MergeReaders(fs FileSysClient, fileType dbio.FileType, nodes FileNodes, lim
 		g.LogError(err)
 	}
 
-	concurrency := runtime.NumCPU()
-	switch {
-	case fs.GetProp("CONCURRENCY") != "":
-		concurrency = cast.ToInt(fs.GetProp("CONCURRENCY"))
-	case g.In(fs.FsType(), dbio.TypeFileS3, dbio.TypeFileGoogle, dbio.TypeFileAzure):
-		switch {
-		// lots of small files (less than 50kb)
-		case len(nodes) > 100 && nodes.AvgSize() < uint64(50*1024):
-			concurrency = 20
-		default:
-			concurrency = 10
-		}
-	case fs.FsType() == dbio.TypeFileLocal:
-		concurrency = 3
-	case concurrency == 1:
-		concurrency = 3
-	}
-
-	g.DebugLow("merging %s readers of %d files [concurrency=%d] from %s", fileType, len(nodes), concurrency, url)
-	readerChn := make(chan *iop.ReaderReady, concurrency)
+	g.DebugLow("merging %s readers of %d files (sequential processing) from %s", fileType, len(nodes), url)
+	readerChn := make(chan *iop.ReaderReady)
 	go func() {
 		defer close(readerChn)
 
@@ -1209,23 +1193,17 @@ func MergeReaders(fs FileSysClient, fileType dbio.FileType, nodes FileNodes, lim
 				continue
 			}
 
-			ds.Context.Wg.Read.Add()
-			go func(path string) {
-				defer ds.Context.Wg.Read.Done()
-				g.Debug("processing reader from %s", path)
+			g.Debug("processing reader from %s", path)
 
-				reader, err := fs.Self().GetReader(path)
-				if err != nil {
-					setError(g.Error(err, "Error getting reader"))
-					return
-				}
+			reader, err := fs.Self().GetReader(path)
+			if err != nil {
+				setError(g.Error(err, "Error getting reader"))
+				return
+			}
 
-				r := &iop.ReaderReady{Reader: reader, URI: path}
-				readerChn <- r
-			}(path)
+			r := &iop.ReaderReady{Reader: reader, URI: path}
+			readerChn <- r
 		}
-
-		ds.Context.Wg.Read.Wait()
 
 	}()
 
