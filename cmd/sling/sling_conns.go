@@ -18,9 +18,142 @@ import (
 )
 
 var (
-	connsDiscover = func(*g.CliSC) error { return g.Error("please use the official build of Sling CLI to use this command") }
+	connsDiscover = discoverConnection
 	connsCheck    = func(*g.CliSC) error { return g.Error("please use the official build of Sling CLI to use this command") }
 )
+
+func discoverConnection(c *g.CliSC) error {
+	env.SetTelVal("task", g.Marshal(g.M("type", sling.ConnDiscover)))
+	
+	name := cast.ToString(c.Vals["name"])
+	if name == "" {
+		return g.Error("connection name is required")
+	}
+
+	// Get connection
+	entries := connection.GetLocalConns()
+	conn := entries.Get(name)
+	if conn.Name == "" {
+		return g.Error("did not find connection %s", name)
+	}
+
+	env.SetTelVal("conn_type", conn.Connection.Type.String())
+
+	// Parse options
+	pattern := cast.ToString(c.Vals["pattern"])
+	recursive := cast.ToBool(c.Vals["recursive"])
+	showColumns := cast.ToBool(c.Vals["columns"])
+
+	level := database.SchemataLevelTable
+	if showColumns {
+		level = database.SchemataLevelColumn
+	}
+
+	opt := &connection.DiscoverOptions{
+		Pattern:   pattern,
+		Level:     level,
+		Recursive: recursive,
+	}
+
+	// Discover using the robust implementation
+	ok, nodes, schemata, err := conn.Connection.Discover(opt)
+	if err != nil {
+		return g.Error(err, "could not discover %s", name)
+	}
+
+	if !ok {
+		return g.Error("discovery failed for %s", name)
+	}
+
+	asJSON := os.Getenv("SLING_OUTPUT") == "json"
+
+	// Output results
+	if conn.Connection.Type.IsDb() {
+		// Database connection
+		if level == database.SchemataLevelColumn {
+			columns := schemata.Columns()
+			if asJSON {
+				fmt.Println(g.Marshal(g.M("columns", columns)))
+			} else {
+				if len(columns) == 0 {
+					g.Info("No columns found")
+					return nil
+				}
+				fields := []string{"column_name", "data_type", "table_name", "schema_name"}
+				rows := make([][]interface{}, 0, len(columns))
+				for _, col := range columns {
+					rows = append(rows, []interface{}{col.Name, col.Type, col.Table, col.Schema})
+				}
+				fmt.Println(g.PrettyTable(fields, rows))
+			}
+		} else {
+			tables := schemata.Tables()
+			if asJSON {
+				fmt.Println(g.Marshal(g.M("tables", tables)))
+			} else {
+				if len(tables) == 0 {
+					g.Info("No tables found")
+					return nil
+				}
+				
+				// Match official output format with row numbers and database column
+				fields := []string{"#", "database", "schema", "name", "type"}
+				rows := make([][]interface{}, 0, len(tables))
+				rowNum := 1
+				for _, table := range tables {
+					tableType := "table"
+					if table.IsView {
+						tableType = "view"
+					}
+					database := table.Database
+					if database == "" {
+						database = "default" // Default for databases that don't specify
+					}
+					rows = append(rows, []interface{}{rowNum, database, table.Schema, table.Name, tableType})
+					rowNum++
+				}
+				fmt.Println(g.PrettyTable(fields, rows))
+			}
+		}
+	} else {
+		// File connection
+		if asJSON {
+			fmt.Println(g.Marshal(g.M("files", nodes)))
+		} else {
+			if len(nodes) == 0 {
+				g.Info("No files found")
+				return nil
+			}
+			
+			if showColumns {
+				// Show files with their columns
+				for _, node := range nodes {
+					fmt.Printf("\nFile: %s\n", node.Path())
+					if len(node.Columns) > 0 {
+						fields := []string{"column_name", "data_type"}
+						rows := make([][]interface{}, 0, len(node.Columns))
+						for _, col := range node.Columns {
+							rows = append(rows, []interface{}{col.Name, col.Type})
+						}
+						fmt.Println(g.PrettyTable(fields, rows))
+					} else {
+						fmt.Println("  No column information available")
+					}
+				}
+			} else {
+				// Show just file paths
+				fields := []string{"file_path", "size", "type"}
+				rows := make([][]interface{}, 0, len(nodes))
+				for _, node := range nodes {
+					rows = append(rows, []interface{}{node.Path(), node.Size, node.Type})
+				}
+				fmt.Println(g.PrettyTable(fields, rows))
+			}
+		}
+	}
+
+	return nil
+}
 
 func processConns(c *g.CliSC) (ok bool, err error) {
 	ok = true
