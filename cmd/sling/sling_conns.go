@@ -24,7 +24,7 @@ var (
 
 func discoverConnection(c *g.CliSC) error {
 	env.SetTelVal("task", g.Marshal(g.M("type", sling.ConnDiscover)))
-	
+
 	name := cast.ToString(c.Vals["name"])
 	if name == "" {
 		return g.Error("connection name is required")
@@ -95,7 +95,7 @@ func discoverConnection(c *g.CliSC) error {
 					g.Info("No tables found")
 					return nil
 				}
-				
+
 				// Match official output format with row numbers and database column
 				fields := []string{"#", "database", "schema", "name", "type"}
 				rows := make([][]interface{}, 0, len(tables))
@@ -124,7 +124,7 @@ func discoverConnection(c *g.CliSC) error {
 				g.Info("No files found")
 				return nil
 			}
-			
+
 			if showColumns {
 				// Show files with their columns
 				for _, node := range nodes {
