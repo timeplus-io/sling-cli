@@ -352,7 +352,10 @@ func (conn *ProtonConn) processBatch(tableFName string, table Table, batch *iop.
 		mapInt32StringCols := []int{}
 		mapInt64StringCols := []int{}
 
-		for i, col := range batch.Columns {
+        // Build casting plans based on the TARGET columns actually used for this batch insert (insFields),
+        // in the SAME ORDER as the incoming batch rows. This ensures value positions match row indexes
+        // and values are coerced to the destination types (e.g., Float64) even if the batch inferred integers.
+        for i, col := range insFields {
 			dbType := strings.ToLower(col.DbType)
 			if strings.HasPrefix(dbType, "nullable(") {
 				dbType = strings.TrimPrefix(dbType, "nullable(")

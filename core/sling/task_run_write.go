@@ -392,17 +392,17 @@ func (t *TaskExecution) writeDirectly(cfg *Config, df *iop.Dataflow, tgtConn dat
 		return 0, err
 	}
 
-	if cfg.Target.Type == dbio.TypeDbProton && cfg.Mode == IncrementalMode {
-		existed, err := database.TableExists(tgtConn, targetTable.FullName())
-		if err != nil {
-			err = g.Error(err, "could not check if final table exists in incremental mode")
-			return 0, err
-		}
-		if !existed {
-			err = g.Error("final table %s not found in incremental mode, please create table %s first", targetTable.FullName(), targetTable.FullName())
-			return 0, err
-		}
-	}
+    if cfg.Target.Type == dbio.TypeDbProton {
+        existed, err := database.TableExists(tgtConn, targetTable.FullName())
+        if err != nil {
+            err = g.Error(err, "could not check if final table exists")
+            return 0, err
+        }
+        if !existed {
+            err = g.Error("final table %s not found, please create table %s first", targetTable.FullName(), targetTable.FullName())
+            return 0, err
+        }
+    }
 
 	// Pause dataflow to set up DDL and handlers
 	if paused := df.Pause(); !paused {
@@ -410,32 +410,7 @@ func (t *TaskExecution) writeDirectly(cfg *Config, df *iop.Dataflow, tgtConn dat
 		return 0, err
 	}
 
-	if cfg.Target.Type == dbio.TypeDbProton && cfg.Mode == IncrementalMode {
-		existed, err := database.TableExists(tgtConn, targetTable.FullName())
-		if err != nil {
-			return 0, g.Error(err, "could not check if final table exists in incremental mode")
-		} else {
-			if !existed {
-				return 0, g.Error("final table %s not found in incremental mode, please create table %s first", targetTable.FullName(), targetTable.FullName())
-			}
-		}
-
-		targetTable.Columns, err = tgtConn.GetSQLColumns(targetTable)
-		if err != nil {
-			err = g.Error(err, "could not get table columns during WriteToDb")
-			return 0, err
-		}
-		for i := range df.Columns {
-			df.Columns[i].Type = targetTable.Columns[i].Type
-			df.Columns[i].DbType = targetTable.Columns[i].DbType
-			for _, ds := range df.StreamMap {
-				if len(ds.Columns) == len(df.Columns) {
-					ds.Columns[i].Type = targetTable.Columns[i].Type
-					ds.Columns[i].DbType = targetTable.Columns[i].DbType
-				}
-			}
-		}
-	}
+    // No need to manually retype df columns for Proton here; importer now casts based on target schema.
 
 	// apply column casing
 	applyColumnCasingToDf(df, tgtConn.GetType(), t.Config.Target.Options.ColumnCasing)
