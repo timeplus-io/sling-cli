@@ -397,15 +397,23 @@ func (t *TaskExecution) runFileToDB() (err error) {
 	}
 
 	if t.isIncrementalWithUpdateKey() {
-		t.SetProgress("getting checkpoint value")
+		// Normalize shorthand for loaded_at before deciding whether to fetch the checkpoint
 		if t.Config.Source.UpdateKey == "." {
 			t.Config.Source.UpdateKey = slingLoadedAtColumn
 		}
 
-		template, _ := dbio.TypeDbDuckDb.Template()
-		if err = getIncrementalValue(t.Config, tgtConn, template.Variable); err != nil {
-			err = g.Error(err, "Could not get incremental value")
-			return err
+		// For file->Proton restore use-cases we may want to skip the checkpoint
+		// (max(update_key)) so that older rows can be re-inserted. In that case
+		// we honor the Config flag and do not call getIncrementalValue.
+		if t.Config.SkipIncrementalCheckpoint() && t.Config.TgtConn.Type == dbio.TypeDbProton && t.Config.SrcConn.Type.Kind() == dbio.KindFile {
+			g.Debug("skipping incremental checkpoint for file->proton (skip_incremental_checkpoint=true)")
+		} else {
+			t.SetProgress("getting checkpoint value")
+			template, _ := dbio.TypeDbDuckDb.Template()
+			if err = getIncrementalValue(t.Config, tgtConn, template.Variable); err != nil {
+				err = g.Error(err, "Could not get incremental value")
+				return err
+			}
 		}
 	}
 
@@ -551,10 +559,14 @@ func (t *TaskExecution) runDbToDb() (err error) {
 
 	// get watermark
 	if t.isIncrementalWithUpdateKey() {
-		t.SetProgress("getting checkpoint value")
-		if err = getIncrementalValue(t.Config, tgtConn, srcConn.Template().Variable); err != nil {
-			err = g.Error(err, "Could not get incremental value")
-			return err
+		if t.Config.SkipIncrementalCheckpoint() && t.Config.TgtConn.Type == dbio.TypeDbProton && t.Config.SrcConn.Type == dbio.TypeDbProton {
+			g.Debug("skipping incremental checkpoint for proton->proton (skip_incremental_checkpoint=true)")
+		} else {
+			t.SetProgress("getting checkpoint value")
+			if err = getIncrementalValue(t.Config, tgtConn, srcConn.Template().Variable); err != nil {
+				err = g.Error(err, "Could not get incremental value")
+				return err
+			}
 		}
 	}
 
