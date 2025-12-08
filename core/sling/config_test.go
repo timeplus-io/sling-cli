@@ -2,6 +2,7 @@ package sling
 
 import (
 	"math"
+	"os"
 	"testing"
 	"time"
 
@@ -56,6 +57,110 @@ func TestConfig(t *testing.T) {
 	_, err := NewConfig(cfgStr)
 	assert.NoError(t, err)
 
+}
+
+func TestSkipIncrementalCheckpointFlag(t *testing.T) {
+	t.Run("config flag only", func(t *testing.T) {
+		cfgStr := `
+mode: incremental
+source:
+  conn: LOCAL
+  stream: /tmp/file.csv
+  options:
+    skip_incremental_checkpoint: true
+target:
+  conn: PROTON_DB
+  object: db.table
+`
+		cfg, err := NewConfig(cfgStr)
+		assert.NoError(t, err)
+		assert.NotNil(t, cfg.Source.Options)
+		assert.NotNil(t, cfg.Source.Options.SkipIncrementalCheckpoint)
+		assert.True(t, *cfg.Source.Options.SkipIncrementalCheckpoint)
+		assert.True(t, cfg.SkipIncrementalCheckpoint())
+	})
+
+	t.Run("env var only", func(t *testing.T) {
+		orig := os.Getenv("SLING_SKIP_INCREMENTAL_CHECKPOINT")
+		defer os.Setenv("SLING_SKIP_INCREMENTAL_CHECKPOINT", orig)
+
+		_ = os.Setenv("SLING_SKIP_INCREMENTAL_CHECKPOINT", "TRUE")
+
+		cfgStr := `
+mode: incremental
+source:
+  conn: LOCAL
+  stream: /tmp/file.csv
+target:
+  conn: PROTON_DB
+  object: db.table
+`
+		cfg, err := NewConfig(cfgStr)
+		assert.NoError(t, err)
+		// no explicit flag in config
+		if cfg.Source.Options != nil {
+			assert.Nil(t, cfg.Source.Options.SkipIncrementalCheckpoint)
+		}
+		assert.True(t, cfg.SkipIncrementalCheckpoint())
+	})
+}
+
+func TestFileUpdateKeyShorthandDot(t *testing.T) {
+	t.Run("normalize dot to loaded_at", func(t *testing.T) {
+		cfgStr := `
+mode: incremental
+source:
+  conn: LOCAL
+  stream: /tmp/file.csv
+  update_key: "."
+target:
+  conn: PROTON_DB
+  object: db.table
+`
+		cfg, err := NewConfig(cfgStr)
+		assert.NoError(t, err)
+		assert.Equal(t, slingLoadedAtColumn, cfg.Source.UpdateKey)
+		if assert.NotNil(t, cfg.MetadataLoadedAt) {
+			assert.True(t, *cfg.MetadataLoadedAt)
+		}
+	})
+
+	t.Run("dot shorthand not allowed for db source", func(t *testing.T) {
+		cfgStr := `
+mode: incremental
+source:
+  conn: POSTGRES
+  stream: public.tbl
+  update_key: "."
+target:
+  conn: PROTON_DB
+  object: db.table
+`
+		_, err := NewConfig(cfgStr)
+		assert.Error(t, err)
+	})
+
+	t.Run("normalize when skipping checkpoint", func(t *testing.T) {
+		cfgStr := `
+mode: incremental
+source:
+  conn: LOCAL
+  stream: /tmp/file.csv
+  update_key: "."
+  options:
+    skip_incremental_checkpoint: true
+target:
+  conn: PROTON_DB
+  object: db.table
+`
+		cfg, err := NewConfig(cfgStr)
+		assert.NoError(t, err)
+		assert.Equal(t, slingLoadedAtColumn, cfg.Source.UpdateKey)
+		if assert.NotNil(t, cfg.MetadataLoadedAt) {
+			assert.True(t, *cfg.MetadataLoadedAt)
+		}
+		assert.True(t, cfg.SkipIncrementalCheckpoint())
+	})
 }
 
 func TestColumnCasing(t *testing.T) {

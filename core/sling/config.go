@@ -219,6 +219,9 @@ func (cfg *Config) SetDefault() {
 		cfg.MetadataLoadedAt = g.Bool(false)
 	}
 
+	// Normalize loaded_at shorthand and enforce metadata when needed
+	cfg.normalizeLoadedAtShorthand()
+
 	// set vars
 	for k, v := range cfg.Env {
 		os.Setenv(k, v)
@@ -329,6 +332,22 @@ func (cfg *Config) sourceIsFile() bool {
 	return cfg.Options.StdIn || cfg.SrcConn.Info().Type.IsFile()
 }
 
+// normalizeLoadedAtShorthand ensures the "." shorthand maps to the loaded_at column
+// and enables metadata generation when required for file incrementals.
+func (cfg *Config) normalizeLoadedAtShorthand() {
+	if cfg.Source.UpdateKey == "." {
+		if cfg.sourceIsFile() {
+			cfg.Source.UpdateKey = slingLoadedAtColumn
+		} else {
+			g.Warn("update_key shorthand '.' is only supported for file sources; leaving as '.'")
+		}
+	}
+
+	if cfg.Source.UpdateKey == slingLoadedAtColumn && cfg.Mode == IncrementalMode && cfg.sourceIsFile() {
+		cfg.MetadataLoadedAt = g.Bool(true)
+	}
+}
+
 func (cfg *Config) DetermineType() (Type JobType, err error) {
 
 	srcFileProvided := cfg.sourceIsFile()
@@ -364,8 +383,14 @@ func (cfg *Config) DetermineType() (Type JobType, err error) {
 			if cfg.Source.UpdateKey == "" {
 				cfg.Source.UpdateKey = "_bigtable_timestamp"
 			}
-		} else if srcFileProvided && cfg.Source.UpdateKey == slingLoadedAtColumn {
-			// need to loaded_at column for file incremental
+		} else if cfg.Source.UpdateKey == "." && !srcFileProvided {
+			err = g.Error("update_key shorthand '.' is only supported when source is file")
+			return
+		} else if srcFileProvided && g.In(cfg.Source.UpdateKey, slingLoadedAtColumn, ".") {
+			// need the loaded_at column for file incremental when using the default shorthand
+			if cfg.Source.UpdateKey == "." {
+				cfg.Source.UpdateKey = slingLoadedAtColumn
+			}
 			cfg.MetadataLoadedAt = g.Bool(true)
 		} else if cfg.Source.UpdateKey == "" && len(cfg.Source.PrimaryKey()) == 0 {
 			err = g.Error("must specify value for 'update_key' and/or 'primary_key' for incremental mode. See docs for more details: https://docs.slingdata.io/sling-cli/run/configuration")
@@ -720,6 +745,11 @@ func (cfg *Config) Prepare() (err error) {
 		}
 	}
 
+	// shorthand validation: "." only supported for file sources
+	if cfg.Source.UpdateKey == "." && !cfg.sourceIsFile() {
+		return g.Error("update_key shorthand '.' is only supported when source is file")
+	}
+
 	// compile pre and post sql
 	if cfg.TgtConn.Type.IsDb() {
 
@@ -747,6 +777,9 @@ func (cfg *Config) Prepare() (err error) {
 			}
 		}
 	}
+
+	// Normalize loaded_at shorthand and enforce metadata when needed
+	cfg.normalizeLoadedAtShorthand()
 
 	// done
 	cfg.Prepared = true
@@ -1053,6 +1086,21 @@ func (cfg *Config) IgnoreExisting() bool {
 	return cfg.Target.Options.IgnoreExisting != nil && *cfg.Target.Options.IgnoreExisting
 }
 
+// SkipIncrementalCheckpoint returns true when this run should *not* fetch the
+// incremental watermark (max(update_key)) from the target before an
+// incremental run. This is primarily used for file->Proton restore scenarios
+// where we want to re-insert older records (e.g. older _tp_time values) even
+// if the table already contains newer rows.
+func (cfg *Config) SkipIncrementalCheckpoint() bool {
+	if cfg.Source.Options != nil && cfg.Source.Options.SkipIncrementalCheckpoint != nil && *cfg.Source.Options.SkipIncrementalCheckpoint {
+		return true
+	}
+	if cast.ToBool(os.Getenv("SLING_SKIP_INCREMENTAL_CHECKPOINT")) {
+		return true
+	}
+	return false
+}
+
 // ColumnsPrepared returns the prepared columns
 func (cfg *Config) ColumnsPrepared() (columns iop.Columns) {
 
@@ -1317,21 +1365,27 @@ type SourceOptions struct {
 	EmptyAsNull    *bool               `json:"empty_as_null,omitempty" yaml:"empty_as_null,omitempty"`
 	Header         *bool               `json:"header,omitempty" yaml:"header,omitempty"`
 	Flatten        *bool               `json:"flatten,omitempty" yaml:"flatten,omitempty"`
-	FieldsPerRec   *int                `json:"fields_per_rec,omitempty" yaml:"fields_per_rec,omitempty"`
-	Compression    *iop.CompressorType `json:"compression,omitempty" yaml:"compression,omitempty"`
-	Format         *dbio.FileType      `json:"format,omitempty" yaml:"format,omitempty"`
-	NullIf         *string             `json:"null_if,omitempty" yaml:"null_if,omitempty"`
-	DatetimeFormat string              `json:"datetime_format,omitempty" yaml:"datetime_format,omitempty"`
-	SkipBlankLines *bool               `json:"skip_blank_lines,omitempty" yaml:"skip_blank_lines,omitempty"`
-	Delimiter      string              `json:"delimiter,omitempty" yaml:"delimiter,omitempty"`
-	Escape         string              `json:"escape,omitempty" yaml:"escape,omitempty"`
-	Quote          string              `json:"quote,omitempty" yaml:"quote,omitempty"`
-	MaxDecimals    *int                `json:"max_decimals,omitempty" yaml:"max_decimals,omitempty"`
-	JmesPath       *string             `json:"jmespath,omitempty" yaml:"jmespath,omitempty"`
-	Sheet          *string             `json:"sheet,omitempty" yaml:"sheet,omitempty"`
-	Range          *string             `json:"range,omitempty" yaml:"range,omitempty"`
-	Limit          *int                `json:"limit,omitempty" yaml:"limit,omitempty"`
-	Offset         *int                `json:"offset,omitempty" yaml:"offset,omitempty"`
+	// SkipIncrementalCheckpoint, when true, prevents Sling from fetching the
+	// current max(update_key) from the target before an incremental run. This
+	// is used for restore scenarios (e.g. file->Proton) where we need to
+	// re-insert older records that would otherwise be skipped by the
+	// incremental watermark.
+	SkipIncrementalCheckpoint *bool               `json:"skip_incremental_checkpoint,omitempty" yaml:"skip_incremental_checkpoint,omitempty"`
+	FieldsPerRec              *int                `json:"fields_per_rec,omitempty" yaml:"fields_per_rec,omitempty"`
+	Compression               *iop.CompressorType `json:"compression,omitempty" yaml:"compression,omitempty"`
+	Format                    *dbio.FileType      `json:"format,omitempty" yaml:"format,omitempty"`
+	NullIf                    *string             `json:"null_if,omitempty" yaml:"null_if,omitempty"`
+	DatetimeFormat            string              `json:"datetime_format,omitempty" yaml:"datetime_format,omitempty"`
+	SkipBlankLines            *bool               `json:"skip_blank_lines,omitempty" yaml:"skip_blank_lines,omitempty"`
+	Delimiter                 string              `json:"delimiter,omitempty" yaml:"delimiter,omitempty"`
+	Escape                    string              `json:"escape,omitempty" yaml:"escape,omitempty"`
+	Quote                     string              `json:"quote,omitempty" yaml:"quote,omitempty"`
+	MaxDecimals               *int                `json:"max_decimals,omitempty" yaml:"max_decimals,omitempty"`
+	JmesPath                  *string             `json:"jmespath,omitempty" yaml:"jmespath,omitempty"`
+	Sheet                     *string             `json:"sheet,omitempty" yaml:"sheet,omitempty"`
+	Range                     *string             `json:"range,omitempty" yaml:"range,omitempty"`
+	Limit                     *int                `json:"limit,omitempty" yaml:"limit,omitempty"`
+	Offset                    *int                `json:"offset,omitempty" yaml:"offset,omitempty"`
 
 	// columns & transforms were moved out of source_options
 	// https://github.com/slingdata-io/sling-cli/issues/348
