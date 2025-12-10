@@ -392,23 +392,27 @@ func (t *TaskExecution) writeDirectly(cfg *Config, df *iop.Dataflow, tgtConn dat
 		return 0, err
 	}
 
-    // Track initial count for validation when appending to existing table
-    var initialCount uint64
+	// Track initial count for validation when appending to existing table
+	var initialCount uint64
 
-    if cfg.Target.Type == dbio.TypeDbProton {
-        existed, err := database.TableExists(tgtConn, targetTable.FullName())
-        if err != nil {
-            err = g.Error(err, "could not check if final table exists")
-            return 0, err
-        }
-        if !existed {
-            err = g.Error("final table %s not found, please create table %s first", targetTable.FullName(), targetTable.FullName())
-            return 0, err
-        }
-        // Get initial count for multi-file import validation
-        initialCount, _ = tgtConn.GetCount(targetTable.FullName())
-        g.Debug("initial table count before insert: %d", initialCount)
-    }
+	if cfg.Target.Type == dbio.TypeDbProton {
+		existed, err := database.TableExists(tgtConn, targetTable.FullName())
+		if err != nil {
+			err = g.Error(err, "could not check if final table exists")
+			return 0, err
+		}
+		if !existed {
+			err = g.Error("final table %s not found, please create table %s first", targetTable.FullName(), targetTable.FullName())
+			return 0, err
+		}
+		// Get initial count for multi-file import validation
+		initialCount, err = tgtConn.GetCount(targetTable.FullName())
+		if err != nil {
+			err = g.Error(err, "could not get initial count from table %s", targetTable.FullName())
+			return 0, err
+		}
+		g.Debug("initial table count before insert: %d", initialCount)
+	}
 
 	// Pause dataflow to set up DDL and handlers
 	if paused := df.Pause(); !paused {
@@ -416,7 +420,7 @@ func (t *TaskExecution) writeDirectly(cfg *Config, df *iop.Dataflow, tgtConn dat
 		return 0, err
 	}
 
-    // No need to manually retype df columns for Proton here; importer now casts based on target schema.
+	// No need to manually retype df columns for Proton here; importer now casts based on target schema.
 
 	// apply column casing
 	applyColumnCasingToDf(df, tgtConn.GetType(), t.Config.Target.Options.ColumnCasing)
