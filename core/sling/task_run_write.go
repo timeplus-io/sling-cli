@@ -392,6 +392,9 @@ func (t *TaskExecution) writeDirectly(cfg *Config, df *iop.Dataflow, tgtConn dat
 		return 0, err
 	}
 
+    // Track initial count for validation when appending to existing table
+    var initialCount uint64
+
     if cfg.Target.Type == dbio.TypeDbProton {
         existed, err := database.TableExists(tgtConn, targetTable.FullName())
         if err != nil {
@@ -402,6 +405,9 @@ func (t *TaskExecution) writeDirectly(cfg *Config, df *iop.Dataflow, tgtConn dat
             err = g.Error("final table %s not found, please create table %s first", targetTable.FullName(), targetTable.FullName())
             return 0, err
         }
+        // Get initial count for multi-file import validation
+        initialCount, _ = tgtConn.GetCount(targetTable.FullName())
+        g.Debug("initial table count before insert: %d", initialCount)
     }
 
 	// Pause dataflow to set up DDL and handlers
@@ -532,8 +538,12 @@ func (t *TaskExecution) writeDirectly(cfg *Config, df *iop.Dataflow, tgtConn dat
 			err = g.Error(err, "could not get count from final table %s", targetTable.FullName())
 			return 0, err
 		}
-		if cnt != tCnt {
-			err = g.Error("inserted into final table but table count (%d) != stream count (%d). Records missing/mismatch. Aborting", tCnt, cnt)
+		// For multi-file imports (e.g., folder of CSVs -> Proton), validate that
+		// new_count == initial_count + stream_count, not new_count == stream_count
+		expectedCount := initialCount + cnt
+		g.Debug("count validation: initialCount=%d, streamCount=%d, expectedCount=%d, actualTableCount=%d", initialCount, cnt, expectedCount, tCnt)
+		if tCnt != expectedCount {
+			err = g.Error("inserted into final table but table count (%d) != expected count (%d) [initial=%d + stream=%d]. Records missing/mismatch. Aborting", tCnt, expectedCount, initialCount, cnt)
 			return 0, err
 		} else if tCnt == 0 && len(sampleData.Rows) > 0 {
 			err = g.Error("Loaded 0 records while sample data has %d records. Exiting.", len(sampleData.Rows))
