@@ -2008,16 +2008,30 @@ func (ds *Datastream) NewCsvReaderChnl(rowLimit int, bytesLimit int64) (readerCh
 	go func() {
 		var w *csv.Writer
 		var br *BatchReader
+		splitPending := false
+		pipeOpen := true
 
 		defer close(readerChn)
 
+		closePipe := func() {
+			if !pipeOpen {
+				return
+			}
+			if w != nil {
+				w.Flush()
+			}
+			pipeW.Close()
+			pipeOpen = false
+		}
+
 		nextPipe := func(batch *Batch) error {
 
-			pipeW.Close() // close the prior reader?
-			tbw = 0       // reset
+			closePipe() // close the prior reader
+			tbw = 0     // reset
 
 			// new reader
 			pipeR, pipeW = io.Pipe()
+			pipeOpen = true
 			w = csv.NewWriter(pipeW)
 			w.Comma = ','
 			if ds.config.Delimiter != "" {
@@ -2050,10 +2064,19 @@ func (ds *Datastream) NewCsvReaderChnl(rowLimit int, bytesLimit int64) (readerCh
 					ds.Context.CaptureErr(err)
 					return
 				}
+				splitPending = false
 			}
 
 			for row0 := range batch.Rows {
 				// g.PP(batch.Columns.MakeRec(row0))
+				if splitPending {
+					err := nextPipe(batch)
+					if err != nil {
+						ds.Context.CaptureErr(err)
+						return
+					}
+					splitPending = false
+				}
 				br.Counter++
 				// convert to csv string
 				row := make([]string, len(row0))
@@ -2074,18 +2097,17 @@ func (ds *Datastream) NewCsvReaderChnl(rowLimit int, bytesLimit int64) (readerCh
 				mux.Unlock()
 
 				if (rowLimit > 0 && br.Counter >= rowLimit) || (bytesLimit > 0 && tbw >= bytesLimit) {
-					err = nextPipe(batch)
-					if err != nil {
-						ds.Context.CaptureErr(err)
-						return
-					}
+					closePipe()
+					splitPending = true
 				}
 			}
 
-			w.Flush()
+			if pipeOpen && w != nil {
+				w.Flush()
+			}
 		}
 
-		pipeW.Close()
+		closePipe()
 
 	}()
 
@@ -2105,6 +2127,7 @@ func (ds *Datastream) NewJsonReaderChnl(rowLimit int, bytesLimit int64) (readerC
 		defer close(readerChn)
 
 		c := 0 // local counter
+		splitPending := false
 
 		bw, _ := pipe.Writer.Write([]byte("["))
 		tbw = tbw + cast.ToInt64(bw)
@@ -2113,6 +2136,16 @@ func (ds *Datastream) NewJsonReaderChnl(rowLimit int, bytesLimit int64) (readerC
 			fields := batch.Columns.Names(true)
 
 			for row0 := range batch.Rows {
+				if splitPending {
+					c = 0
+					firstRec = true
+					pipe = g.NewPipe()
+					readerChn <- pipe.Reader
+					bw, _ := pipe.Writer.Write([]byte("["))
+					tbw = cast.ToInt64(bw)
+					splitPending = false
+				}
+
 				c++
 
 				rec := g.M()
@@ -2148,20 +2181,15 @@ func (ds *Datastream) NewJsonReaderChnl(rowLimit int, bytesLimit int64) (readerC
 					pipe.Writer.Write([]byte("]")) // close bracket
 					pipe.Writer.Close()            // close the prior reader?
 					tbw = 0                        // reset
-
-					// new reader
-					c = 0
-					firstRec = true
-					pipe = g.NewPipe()
-					readerChn <- pipe.Reader
-					bw, _ := pipe.Writer.Write([]byte("["))
-					tbw = tbw + cast.ToInt64(bw)
+					splitPending = true
 				}
 			}
 		}
 
-		pipe.Writer.Write([]byte("]")) // close bracket
-		pipe.Writer.Close()
+		if !splitPending {
+			pipe.Writer.Write([]byte("]")) // close bracket
+			pipe.Writer.Close()
+		}
 	}()
 
 	return readerChn
@@ -2181,11 +2209,20 @@ func (ds *Datastream) NewJsonLinesReaderChnl(rowLimit int, bytesLimit int64) (re
 		defer close(readerChn)
 
 		c := 0 // local counter
+		splitPending := false
 
 		for batch := range ds.BatchChan {
 			fields := batch.Columns.Names(true)
 
 			for row0 := range batch.Rows {
+				if splitPending {
+					c = 0
+					pipe = g.NewPipe()
+					readerChn <- pipe.Reader
+					tbw = 0
+					splitPending = false
+				}
+
 				c++
 
 				rec := g.M()
@@ -2213,15 +2250,13 @@ func (ds *Datastream) NewJsonLinesReaderChnl(rowLimit int, bytesLimit int64) (re
 				if (rowLimit > 0 && c >= rowLimit) || (bytesLimit > 0 && tbw >= bytesLimit) {
 					pipe.Writer.Close() // close the prior reader?
 					tbw = 0             // reset
-
-					// new reader
-					c = 0
-					pipe = g.NewPipe()
-					readerChn <- pipe.Reader
+					splitPending = true
 				}
 			}
 		}
-		pipe.Writer.Close()
+		if !splitPending {
+			pipe.Writer.Close()
+		}
 	}()
 
 	return readerChn
@@ -2241,19 +2276,30 @@ func (ds *Datastream) NewParquetArrowReaderChnl(rowLimit int, bytesLimit int64, 
 		var pw *ParquetArrowWriter
 		var br *BatchReader
 		var err error
+		splitPending := false
+		pipeOpen := true
 
 		defer close(readerChn)
 
-		nextPipe := func(batch *Batch) error {
+		closePipe := func() {
+			if !pipeOpen {
+				return
+			}
 			if pw != nil {
 				pw.Close()
+				pw = nil
 			}
+			pipeW.Close()
+			pipeOpen = false
+		}
 
-			pipeW.Close() // close the prior reader?
-			tbw = 0       // reset
+		nextPipe := func(batch *Batch) error {
+			closePipe() // close the prior reader
+			tbw = 0     // reset
 
 			// new reader
 			pipeR, pipeW = io.Pipe()
+			pipeOpen = true
 
 			br = &BatchReader{batch, batch.Columns, pipeR, 0}
 			readerChn <- br
@@ -2287,9 +2333,19 @@ func (ds *Datastream) NewParquetArrowReaderChnl(rowLimit int, bytesLimit int64, 
 					ds.Context.CaptureErr(err)
 					return
 				}
+				splitPending = false
 			}
 
 			for row := range batch.Rows {
+				if splitPending {
+					err := nextPipe(batch)
+					if err != nil {
+						ds.Context.CaptureErr(err)
+						return
+					}
+					splitPending = false
+				}
+
 				err := pw.WriteRow(row)
 				if err != nil {
 					ds.Context.CaptureErr(g.Error(err, "error writing row"))
@@ -2301,20 +2357,13 @@ func (ds *Datastream) NewParquetArrowReaderChnl(rowLimit int, bytesLimit int64, 
 				br.Counter++
 
 				if (rowLimit > 0 && br.Counter >= rowLimit) || (bytesLimit > 0 && tbw >= bytesLimit) {
-					err = nextPipe(batch)
-					if err != nil {
-						ds.Context.CaptureErr(err)
-						return
-					}
+					closePipe()
+					splitPending = true
 				}
 			}
 		}
 
-		if pw != nil {
-			pw.Close()
-		}
-
-		pipeW.Close()
+		closePipe()
 
 	}()
 
@@ -2368,19 +2417,30 @@ func (ds *Datastream) NewParquetReaderChnl(rowLimit int, bytesLimit int64, compr
 		var pw *ParquetWriter
 		var br *BatchReader
 		var err error
+		splitPending := false
+		pipeOpen := true
 
 		defer close(readerChn)
 
-		nextPipe := func(batch *Batch) error {
+		closePipe := func() {
+			if !pipeOpen {
+				return
+			}
 			if pw != nil {
 				pw.Close()
+				pw = nil
 			}
+			pipeW.Close()
+			pipeOpen = false
+		}
 
-			pipeW.Close() // close the prior reader?
-			tbw = 0       // reset
+		nextPipe := func(batch *Batch) error {
+			closePipe() // close the prior reader
+			tbw = 0     // reset
 
 			// new reader
 			pipeR, pipeW = io.Pipe()
+			pipeOpen = true
 
 			br = &BatchReader{batch, batch.Columns, pipeR, 0}
 			readerChn <- br
@@ -2415,9 +2475,18 @@ func (ds *Datastream) NewParquetReaderChnl(rowLimit int, bytesLimit int64, compr
 					ds.Context.CaptureErr(err)
 					return
 				}
+				splitPending = false
 			}
 
 			for row := range batch.Rows {
+				if splitPending {
+					err := nextPipe(batch)
+					if err != nil {
+						ds.Context.CaptureErr(err)
+						return
+					}
+					splitPending = false
+				}
 
 				err := pw.WriteRec(row)
 				if err != nil {
@@ -2430,11 +2499,8 @@ func (ds *Datastream) NewParquetReaderChnl(rowLimit int, bytesLimit int64, compr
 				br.Counter++
 
 				if (rowLimit > 0 && br.Counter >= rowLimit) || (bytesLimit > 0 && tbw >= bytesLimit) {
-					err = nextPipe(batch)
-					if err != nil {
-						ds.Context.CaptureErr(err)
-						return
-					}
+					closePipe()
+					splitPending = true
 				} else if rowLimit == 0 && br.Counter == 10000000 {
 					// memory can build up when writing a large dataset to a single parquet file
 					// https://github.com/slingdata-io/sling-cli/issues/351
@@ -2443,10 +2509,7 @@ func (ds *Datastream) NewParquetReaderChnl(rowLimit int, bytesLimit int64, compr
 			}
 		}
 
-		if pw != nil {
-			pw.Close()
-		}
-		pipeW.Close()
+		closePipe()
 
 	}()
 
