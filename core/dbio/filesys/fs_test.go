@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -196,6 +197,36 @@ func TestFileSysLocalFormat(t *testing.T) {
 	if !t.Failed() {
 		os.RemoveAll("test/test_write")
 	}
+}
+
+func TestFileSysLocalCsvRowLimitExact(t *testing.T) {
+	t.Parallel()
+
+	fs, err := NewFileSysClient(dbio.TypeFileLocal)
+	assert.NoError(t, err)
+
+	fs.SetProp("header", "false")
+	df, err := fs.ReadDataflow("test/test2/test2.1.noheader.csv")
+	assert.NoError(t, err)
+
+	outDir := filepath.Join(t.TempDir(), "csv.exact")
+	fsOut, err := NewFileSysClient(dbio.TypeFileLocal, "FORMAT=csv", "FILE_MAX_ROWS=6")
+	assert.NoError(t, err)
+	fsOut.SetProp("header", "true")
+
+	_, err = WriteDataflow(fsOut, df, outDir)
+	assert.NoError(t, err)
+
+	nodes, err := fsOut.ListRecursive(outDir)
+	assert.NoError(t, err)
+
+	csvFiles := 0
+	for _, uri := range nodes.URIs() {
+		if strings.HasSuffix(uri, ".csv") {
+			csvFiles++
+		}
+	}
+	assert.Equal(t, 3, csvFiles)
 }
 
 func TestFileSysLocalJson(t *testing.T) {
