@@ -339,6 +339,8 @@ func parseUint64(val string) (any, error) {
 	if f < 0 || f > math.MaxUint64 {
 		return nil, fmt.Errorf("value %s overflows uint64", val)
 	}
+	// Note: float64 only has 53 bits of mantissa, so values beyond 2^53
+	// may lose precision. This matches the generic CastVal behavior.
 	return uint64(f), nil
 }
 
