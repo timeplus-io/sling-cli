@@ -22,16 +22,29 @@ type targetCastPlan struct {
 	columns      Columns
 	dateLayouts  []string // fallback layouts for datetime parsing
 	layoutCaches []string // per-column datetime layout cache
+
+	// Config flags — must match generic CastVal semantics
+	trimSpace      bool
+	emptyAsNull    bool
+	nullIf         string
+	lastBlankCount int // for skip_blank_lines support
 }
 
 // NewTargetCastPlan builds a cast plan from known target columns.
 // Each column gets a dedicated parser function based on its type.
-func NewTargetCastPlan(columns Columns, dateLayouts []string) *targetCastPlan {
+func NewTargetCastPlan(columns Columns, dateLayouts []string, sp *StreamProcessor) *targetCastPlan {
 	plan := &targetCastPlan{
 		parsers:      make([]columnParser, len(columns)),
 		columns:      columns,
 		dateLayouts:  dateLayouts,
 		layoutCaches: make([]string, len(columns)),
+	}
+
+	// Copy config from StreamProcessor to preserve null/trim semantics
+	if sp != nil && sp.Config != nil {
+		plan.trimSpace = sp.Config.TrimSpace
+		plan.emptyAsNull = sp.Config.EmptyAsNull
+		plan.nullIf = sp.Config.NullIf
 	}
 
 	for i, col := range columns {
@@ -114,10 +127,13 @@ func (p *targetCastPlan) makeParser(colIdx int, col Column) columnParser {
 
 // CastRow converts a row of raw values using precompiled parsers.
 // This is the fast path: no stats, no inference, no transform lookup.
+// Null/trim semantics match the generic CastVal path.
 func (p *targetCastPlan) CastRow(row []any) []any {
+	blankCount := 0
 	for i := 0; i < len(row) && i < len(p.parsers); i++ {
 		val := row[i]
 		if val == nil {
+			blankCount++
 			continue
 		}
 
@@ -127,9 +143,29 @@ func (p *targetCastPlan) CastRow(row []any) []any {
 			s = cast.ToString(val)
 		}
 
-		s = strings.TrimSpace(s)
-		if s == "" || s == "NULL" {
+		isStringCol := p.columns[i].IsString()
+
+		// Trim: only trim non-string columns, or if TrimSpace is configured.
+		// This matches CastVal line 571: if sp.Config.TrimSpace || !col.IsString()
+		if p.trimSpace || !isStringCol {
+			s = strings.TrimSpace(s)
+		}
+
+		// Empty handling — match CastVal lines 577-588
+		if s == "" {
+			blankCount++
+			if p.emptyAsNull || !isStringCol {
+				row[i] = nil
+			} else {
+				row[i] = s // preserve empty string for string columns
+			}
+			continue
+		}
+
+		// NullIf sentinel — match CastVal line 584
+		if p.nullIf != "" && s == p.nullIf {
 			row[i] = nil
+			blankCount++
 			continue
 		}
 
@@ -145,6 +181,9 @@ func (p *targetCastPlan) CastRow(row []any) []any {
 	for len(row) < len(p.parsers) {
 		row = append(row, nil)
 	}
+
+	// Store blank count for skip_blank_lines support
+	p.lastBlankCount = blankCount
 
 	return row
 }

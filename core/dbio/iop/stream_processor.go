@@ -51,7 +51,7 @@ type StreamProcessor struct {
 // SetTargetCastPlan enables the schema-driven fast path.
 // Call this before streaming begins when the target table already exists.
 func (sp *StreamProcessor) SetTargetCastPlan(columns Columns) {
-	sp.targetCastPlan = NewTargetCastPlan(columns, sp.dateLayouts)
+	sp.targetCastPlan = NewTargetCastPlan(columns, sp.dateLayouts, sp)
 	g.Debug("fast cast plan enabled for %d columns", len(columns))
 }
 
@@ -64,7 +64,9 @@ func (sp *StreamProcessor) HasTargetCastPlan() bool {
 // Only called when targetCastPlan is set (schema-driven fast path).
 func (sp *StreamProcessor) CastRowToTarget(row []any) []any {
 	sp.N++
-	return sp.targetCastPlan.CastRow(row)
+	row = sp.targetCastPlan.CastRow(row)
+	sp.rowBlankValCnt = sp.targetCastPlan.lastBlankCount
+	return row
 }
 
 type StreamConfig struct {
