@@ -502,7 +502,12 @@ func main() {
 		}
 	}
 
+	profilesFlushed := false
 	flushProfiles := func() {
+		if profilesFlushed {
+			return
+		}
+		profilesFlushed = true
 		for i := len(profileCleanup) - 1; i >= 0; i-- {
 			profileCleanup[i]()
 		}

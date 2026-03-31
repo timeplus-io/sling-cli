@@ -17,6 +17,10 @@ type columnParser func(val string) (any, error)
 // targetCastPlan holds precompiled parsers for schema-driven fast casting.
 // When a target table schema is known upfront, this eliminates per-cell
 // type inference, stats collection, and transform lookup.
+//
+// NOT goroutine-safe: each Datastream must have its own plan instance
+// because datetime layout caches are written during CastRow.
+// PushStreamChan creates a new plan per stream via SetTargetCastPlan.
 type targetCastPlan struct {
 	parsers      []columnParser
 	columns      Columns
@@ -60,14 +64,17 @@ func (p *targetCastPlan) makeParser(colIdx int, col Column) columnParser {
 	// Fall back to sling's generic ColumnType for broader compatibility.
 	dbType := strings.ToLower(col.DbType)
 
-	// Strip nullable/low_cardinality wrappers
-	if strings.HasPrefix(dbType, "nullable(") {
-		dbType = strings.TrimPrefix(dbType, "nullable(")
-		dbType = strings.TrimSuffix(dbType, ")")
-	}
-	if strings.HasPrefix(dbType, "low_cardinality(") {
-		dbType = strings.TrimPrefix(dbType, "low_cardinality(")
-		dbType = strings.TrimSuffix(dbType, ")")
+	// Strip nullable/low_cardinality wrappers (handles both orderings
+	// and nesting like nullable(low_cardinality(string)))
+	for strings.HasPrefix(dbType, "nullable(") || strings.HasPrefix(dbType, "low_cardinality(") {
+		if strings.HasPrefix(dbType, "nullable(") {
+			dbType = strings.TrimPrefix(dbType, "nullable(")
+			dbType = strings.TrimSuffix(dbType, ")")
+		}
+		if strings.HasPrefix(dbType, "low_cardinality(") {
+			dbType = strings.TrimPrefix(dbType, "low_cardinality(")
+			dbType = strings.TrimSuffix(dbType, ")")
+		}
 	}
 
 	// Match on native DB type first (Proton types)
