@@ -64,16 +64,16 @@ func (p *targetCastPlan) makeParser(colIdx int, col Column) columnParser {
 	// Fall back to sling's generic ColumnType for broader compatibility.
 	dbType := strings.ToLower(col.DbType)
 
-	// Strip nullable/low_cardinality wrappers (handles both orderings
-	// and nesting like nullable(low_cardinality(string)))
-	for strings.HasPrefix(dbType, "nullable(") || strings.HasPrefix(dbType, "low_cardinality(") {
+	// Strip nullable/low_cardinality wrappers by peeling matched pairs.
+	// Handles nesting like nullable(low_cardinality(string)) or
+	// low_cardinality(nullable(decimal(18,2))) without breaking inner parens.
+	for {
 		if strings.HasPrefix(dbType, "nullable(") {
-			dbType = strings.TrimPrefix(dbType, "nullable(")
-			dbType = strings.TrimSuffix(dbType, ")")
-		}
-		if strings.HasPrefix(dbType, "low_cardinality(") {
-			dbType = strings.TrimPrefix(dbType, "low_cardinality(")
-			dbType = strings.TrimSuffix(dbType, ")")
+			dbType = dbType[len("nullable(") : len(dbType)-1]
+		} else if strings.HasPrefix(dbType, "low_cardinality(") {
+			dbType = dbType[len("low_cardinality(") : len(dbType)-1]
+		} else {
+			break
 		}
 	}
 
@@ -266,7 +266,11 @@ func parseUint8(val string) (any, error) {
 	if err == nil {
 		return uint8(n), nil
 	}
-	return nil, err
+	f, err := strconv.ParseFloat(val, 64)
+	if err != nil {
+		return nil, err
+	}
+	return uint8(f), nil
 }
 
 func parseUint16(val string) (any, error) {
@@ -274,7 +278,11 @@ func parseUint16(val string) (any, error) {
 	if err == nil {
 		return uint16(n), nil
 	}
-	return nil, err
+	f, err := strconv.ParseFloat(val, 64)
+	if err != nil {
+		return nil, err
+	}
+	return uint16(f), nil
 }
 
 func parseUint32(val string) (any, error) {
@@ -282,7 +290,11 @@ func parseUint32(val string) (any, error) {
 	if err == nil {
 		return uint32(n), nil
 	}
-	return nil, err
+	f, err := strconv.ParseFloat(val, 64)
+	if err != nil {
+		return nil, err
+	}
+	return uint32(f), nil
 }
 
 func parseUint64(val string) (any, error) {
@@ -290,7 +302,11 @@ func parseUint64(val string) (any, error) {
 	if err == nil {
 		return n, nil
 	}
-	return nil, err
+	f, err := strconv.ParseFloat(val, 64)
+	if err != nil {
+		return nil, err
+	}
+	return uint64(f), nil
 }
 
 func parseFloat32(val string) (any, error) {
