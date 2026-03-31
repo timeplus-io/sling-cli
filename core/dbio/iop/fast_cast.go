@@ -163,9 +163,10 @@ func (p *targetCastPlan) CastRow(row []any) []any {
 		}
 
 		// NullIf sentinel — match CastVal line 584
+		// Note: generic CastVal does NOT count null_if matches as blank,
+		// only actual empty strings increment rowBlankValCnt.
 		if p.nullIf != "" && s == p.nullIf {
 			row[i] = nil
-			blankCount++
 			continue
 		}
 
