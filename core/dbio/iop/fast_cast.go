@@ -31,7 +31,8 @@ type targetCastPlan struct {
 	trimSpace      bool
 	emptyAsNull    bool
 	nullIf         string
-	lastBlankCount int // for skip_blank_lines support
+	lastBlankCount int          // for skip_blank_lines support
+	parseErrLogged map[int]bool // log first parse error per column
 }
 
 // NewTargetCastPlan builds a cast plan from known target columns.
@@ -179,7 +180,15 @@ func (p *targetCastPlan) CastRow(row []any) []any {
 
 		parsed, err := p.parsers[i](s)
 		if err != nil {
-			// Keep original value on parse error; processBatch will handle it
+			// Keep original value; processBatch conversion will handle it.
+			// Log once per column to surface type mismatches during development.
+			if p.parseErrLogged == nil {
+				p.parseErrLogged = make(map[int]bool)
+			}
+			if !p.parseErrLogged[i] {
+				p.parseErrLogged[i] = true
+				g.Debug("fast cast: parse error col %d (%s): %v (value=%q)", i, p.columns[i].Name, err, s)
+			}
 			continue
 		}
 		row[i] = parsed

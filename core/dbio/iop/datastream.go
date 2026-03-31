@@ -2092,6 +2092,7 @@ func (ds *Datastream) NewCsvReaderChnl(rowLimit int, bytesLimit int64) (readerCh
 				if err != nil {
 					ds.Context.CaptureErr(g.Error(err, "error writing row"))
 					ds.Context.Cancel()
+					w.Flush() // flush buffered rows before closing
 					pipeW.Close()
 					return
 				}
