@@ -2,6 +2,7 @@ package iop
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -40,10 +41,11 @@ type targetCastPlan struct {
 // Each column gets a dedicated parser function based on its type.
 func NewTargetCastPlan(columns Columns, dateLayouts []string, sp *StreamProcessor) *targetCastPlan {
 	plan := &targetCastPlan{
-		parsers:      make([]columnParser, len(columns)),
-		columns:      columns,
-		dateLayouts:  dateLayouts,
-		layoutCaches: make([]string, len(columns)),
+		parsers:        make([]columnParser, len(columns)),
+		columns:        columns,
+		dateLayouts:    dateLayouts,
+		layoutCaches:   make([]string, len(columns)),
+		parseErrLogged: make(map[int]bool),
 	}
 
 	// Copy config from StreamProcessor to preserve null/trim semantics
@@ -183,9 +185,6 @@ func (p *targetCastPlan) CastRow(row []any) []any {
 		if err != nil {
 			// Keep original value; processBatch conversion will handle it.
 			// Log once per column to surface type mismatches during development.
-			if p.parseErrLogged == nil {
-				p.parseErrLogged = make(map[int]bool)
-			}
 			if !p.parseErrLogged[i] {
 				p.parseErrLogged[i] = true
 				g.Debug("fast cast: parse error col %d (%s): %v (value=%q)", i, p.columns[i].Name, err, s)
@@ -337,7 +336,7 @@ func parseUint64(val string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if f < 0 {
+	if f < 0 || f > math.MaxUint64 {
 		return nil, fmt.Errorf("value %s overflows uint64", val)
 	}
 	return uint64(f), nil
@@ -364,12 +363,17 @@ func parseDecimal(val string) (any, error) {
 }
 
 // makeDatetimeParser creates a closure with per-column layout cache.
+// Matches generic ParseTime semantics: date-only values (midnight) are
+// converted to UTC to normalize timezone-aware date representations.
 func (p *targetCastPlan) makeDatetimeParser(colIdx int) columnParser {
 	return func(val string) (any, error) {
 		// Try cached layout first (per-column cache)
 		if cached := p.layoutCaches[colIdx]; cached != "" {
 			t, err := time.Parse(cached, val)
 			if err == nil {
+				if isDate(&t) {
+					t = t.UTC()
+				}
 				return t, nil
 			}
 		}
@@ -379,6 +383,9 @@ func (p *targetCastPlan) makeDatetimeParser(colIdx int) columnParser {
 			t, err := time.Parse(layout, val)
 			if err == nil {
 				p.layoutCaches[colIdx] = layout
+				if isDate(&t) {
+					t = t.UTC()
+				}
 				return t, nil
 			}
 		}
@@ -387,6 +394,9 @@ func (p *targetCastPlan) makeDatetimeParser(colIdx int) columnParser {
 		t, err := cast.ToTimeE(val)
 		if err != nil {
 			return nil, g.Error(err, "cannot parse datetime: %s", val)
+		}
+		if isDate(&t) {
+			t = t.UTC()
 		}
 		return t, nil
 	}

@@ -205,6 +205,20 @@ func TestCastRowDatetime(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, 2025, ts2.Year())
 	assert.Equal(t, time.June, ts2.Month())
+
+	// Date-only values (midnight UTC) should be normalized to UTC,
+	// matching generic ParseTime behavior.
+	dateCols := Columns{
+		{Name: "d", Type: DatetimeType, DbType: "date"},
+	}
+	dateLayouts := []string{"2006-01-02"}
+	datePlan := NewTargetCastPlan(dateCols, dateLayouts, sp)
+	row = []any{"2025-03-15"}
+	row = datePlan.CastRow(row)
+	dt, ok := row[0].(time.Time)
+	assert.True(t, ok, "date should parse to time.Time")
+	assert.True(t, dt.Location() == time.UTC, "date-only value should be in UTC")
+	assert.Equal(t, 15, dt.Day())
 }
 
 func TestParserOverflow(t *testing.T) {

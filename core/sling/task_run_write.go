@@ -573,11 +573,9 @@ func (t *TaskExecution) writeDirectly(cfg *Config, df *iop.Dataflow, tgtConn dat
 			}
 
 			if allMatched {
-				// Set on existing streams
-				for _, ds := range df.Streams {
-					ds.Sp.SetTargetCastPlan(typedCols)
-				}
-				// Set on dataflow so new streams inherit it
+				// Set on dataflow so new streams inherit it via PushStreamChan.
+				// Don't iterate df.Streams here — it's racy without df.mux,
+				// and during pause streams haven't been pushed yet anyway.
 				df.TargetCastColumns = typedCols
 				g.Debug("schema-driven fast cast enabled for %d columns", len(typedCols))
 			}

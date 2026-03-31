@@ -31,6 +31,8 @@ import (
 	"github.com/spf13/cast"
 )
 
+const csvFlushInterval = 10000 // rows between csv.Writer.Flush calls
+
 var (
 	jsoniter = jit.ConfigCompatibleWithStandardLibrary
 )
@@ -2100,7 +2102,7 @@ func (ds *Datastream) NewCsvReaderChnl(rowLimit int, bytesLimit int64) (readerCh
 				// Flush periodically instead of every row.
 				// csv.Writer already buffers internally; per-row Flush forces
 				// a syscall on every row, wasting ~13% of total CPU.
-				if br.Counter%10000 == 0 {
+				if br.Counter%csvFlushInterval == 0 {
 					w.Flush()
 				}
 				mux.Unlock()
