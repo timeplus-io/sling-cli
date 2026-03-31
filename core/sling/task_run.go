@@ -656,7 +656,8 @@ func (t *TaskExecution) createIntermediateConfig() *Config {
 	// CSV is the default. Parquet is available as an experimental option
 	// via SLING_INTERMEDIATE_FORMAT=parquet (preserves types, 5x smaller),
 	// but the Parquet→DB read-back pipeline has a channel deadlock that
-	// needs to be resolved first.
+	// needs to be resolved first. TODO: track and fix the parquet_arrow.go
+	// readRowsLoop channel send blocking issue.
 	timestamp := time.Now().Format("20060102_150405")
 	sourceTable := t.Config.Source.Stream
 	targetTable := t.Config.Target.Object

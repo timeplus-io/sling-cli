@@ -234,6 +234,29 @@ func TestParserOverflow(t *testing.T) {
 	assert.Equal(t, uint16(100), v)
 }
 
+func TestStreamProcessorFastCastGuard(t *testing.T) {
+	sp := &StreamProcessor{
+		Config:      &StreamConfig{NullIf: "NULL"},
+		dateLayouts: []string{},
+	}
+
+	// Fast cast plan is not set by default
+	assert.False(t, sp.HasTargetCastPlan(), "fast cast should be disabled by default")
+
+	// After setting, it should be active
+	cols := Columns{
+		{Name: "a", Type: BigIntType, DbType: "int64"},
+		{Name: "b", Type: StringType, DbType: "string"},
+	}
+	sp.SetTargetCastPlan(cols)
+	assert.True(t, sp.HasTargetCastPlan(), "fast cast should be enabled after SetTargetCastPlan")
+
+	// CastRowToTarget should work and update rowBlankValCnt
+	row := sp.CastRowToTarget([]any{"42", ""})
+	assert.Equal(t, int64(42), row[0])
+	assert.Equal(t, "", row[1]) // string col with EmptyAsNull=false → preserved
+}
+
 func TestCastRowPadding(t *testing.T) {
 	cols := Columns{
 		{Name: "a", Type: BigIntType, DbType: "int64"},

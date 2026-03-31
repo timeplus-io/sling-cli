@@ -278,6 +278,8 @@ func parseInt64(val string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Note: float64 only has 53 bits of mantissa, so values beyond ±2^53
+	// may lose precision. This matches the generic CastVal behavior.
 	return int64(f), nil
 }
 

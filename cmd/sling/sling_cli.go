@@ -431,12 +431,13 @@ func Track(event string, props ...map[string]interface{}) {
 	}
 }
 
-func main() {
+// setupProfiling configures CPU, memory, and trace profiling from env vars.
+// Returns a flush function that must be called before os.Exit() since defers don't run.
+// Env vars: SLING_PPROF, SLING_MEMPROF, SLING_TRACE (set to "1" or a file path).
+func setupProfiling() func() {
+	var cleanups []func()
 
-	// Profiling cleanup — must be called before os.Exit() since defers don't run.
-	var profileCleanup []func()
-
-	// CPU profiling: set SLING_PPROF=1 or SLING_PPROF=/path/to/file.prof
+	// CPU profiling
 	if pprofPath := os.Getenv("SLING_PPROF"); pprofPath != "" {
 		if pprofPath == "1" || pprofPath == "true" {
 			pprofPath = "sling_cpu.prof"
@@ -450,7 +451,7 @@ func main() {
 				f.Close()
 			} else {
 				g.Info("CPU profiling enabled, writing to %s", pprofPath)
-				profileCleanup = append(profileCleanup, func() {
+				cleanups = append(cleanups, func() {
 					pprof.StopCPUProfile()
 					f.Close()
 					g.Info("CPU profile written to %s", pprofPath)
@@ -459,12 +460,12 @@ func main() {
 		}
 	}
 
-	// Memory profiling: set SLING_MEMPROF=1 or SLING_MEMPROF=/path/to/file.prof
+	// Memory profiling
 	if memPath := os.Getenv("SLING_MEMPROF"); memPath != "" {
 		if memPath == "1" || memPath == "true" {
 			memPath = "sling_mem.prof"
 		}
-		profileCleanup = append(profileCleanup, func() {
+		cleanups = append(cleanups, func() {
 			runtime.GC()
 			f, err := os.Create(memPath)
 			if err != nil {
@@ -479,7 +480,7 @@ func main() {
 		})
 	}
 
-	// Execution trace: set SLING_TRACE=1 or SLING_TRACE=/path/to/trace.out
+	// Execution trace
 	if tracePath := os.Getenv("SLING_TRACE"); tracePath != "" {
 		if tracePath == "1" || tracePath == "true" {
 			tracePath = "sling_trace.out"
@@ -493,7 +494,7 @@ func main() {
 				f.Close()
 			} else {
 				g.Info("Execution trace enabled, writing to %s", tracePath)
-				profileCleanup = append(profileCleanup, func() {
+				cleanups = append(cleanups, func() {
 					trace.Stop()
 					f.Close()
 					g.Info("Execution trace written to %s", tracePath)
@@ -502,16 +503,20 @@ func main() {
 		}
 	}
 
-	profilesFlushed := false
-	flushProfiles := func() {
-		if profilesFlushed {
+	flushed := false
+	return func() {
+		if flushed {
 			return
 		}
-		profilesFlushed = true
-		for i := len(profileCleanup) - 1; i >= 0; i-- {
-			profileCleanup[i]()
+		flushed = true
+		for i := len(cleanups) - 1; i >= 0; i-- {
+			cleanups[i]()
 		}
 	}
+}
+
+func main() {
+	flushProfiles := setupProfiling()
 
 	exitCode := 11
 	done := make(chan struct{})

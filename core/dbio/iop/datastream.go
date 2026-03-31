@@ -2106,8 +2106,7 @@ func (ds *Datastream) NewCsvReaderChnl(rowLimit int, bytesLimit int64) (readerCh
 				mux.Unlock()
 
 				if (rowLimit > 0 && br.Counter >= rowLimit) || (bytesLimit > 0 && tbw >= bytesLimit) {
-					w.Flush() // flush remaining buffered rows before closing pipe
-					closePipe()
+					closePipe() // closePipe already calls w.Flush()
 					splitPending = true
 				}
 			}
