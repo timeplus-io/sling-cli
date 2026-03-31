@@ -9,25 +9,33 @@ import (
 )
 
 func TestUnwrapDbType(t *testing.T) {
-	plan := &targetCastPlan{}
+	sp := &StreamProcessor{Config: &StreamConfig{NullIf: "NULL"}, dateLayouts: []string{"2006-01-02"}}
+	plan := NewTargetCastPlan(Columns{}, []string{}, sp)
+
 	cases := []struct {
-		col      Column
-		expected string
+		col    Column
+		input  string
+		expect any
 	}{
-		{Column{DbType: "int64"}, "int64"},
-		{Column{DbType: "nullable(float64)"}, "float64"},
-		{Column{DbType: "low_cardinality(string)"}, "string"},
-		{Column{DbType: "nullable(low_cardinality(string))"}, "string"},
-		{Column{DbType: "low_cardinality(nullable(string))"}, "string"},
-		{Column{DbType: "nullable(decimal(18, 2))"}, "decimal(18, 2)"},
-		{Column{DbType: "nullable(datetime64(3, 'UTC'))"}, "datetime64(3, 'utc')"},
+		{Column{DbType: "int64"}, "42", int64(42)},
+		{Column{DbType: "nullable(float64)"}, "3.14", 3.14},
+		{Column{DbType: "low_cardinality(string)"}, "hello", "hello"},
+		{Column{DbType: "nullable(low_cardinality(string))"}, "world", "world"},
+		{Column{DbType: "low_cardinality(nullable(string))"}, "test", "test"},
+		{Column{DbType: "nullable(decimal(18, 2))"}, "99.99", mustDecimal("99.99")},
+		{Column{DbType: "nullable(bool)"}, "true", true},
 	}
 	for _, c := range cases {
 		parser := plan.makeParser(0, c.col)
-		_ = parser // just verify no panic
-		// Verify by checking the function actually works
+		result, err := parser(c.input)
+		assert.NoError(t, err, "dbType=%s input=%s", c.col.DbType, c.input)
+		assert.Equal(t, c.expect, result, "dbType=%s input=%s", c.col.DbType, c.input)
 	}
-	_ = cases
+}
+
+func mustDecimal(s string) any {
+	v, _ := decimal.NewFromString(s)
+	return v
 }
 
 func TestParsers(t *testing.T) {
@@ -197,6 +205,33 @@ func TestCastRowDatetime(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, 2025, ts2.Year())
 	assert.Equal(t, time.June, ts2.Month())
+}
+
+func TestParserOverflow(t *testing.T) {
+	// int8 overflow: "999" should error, not silently truncate
+	_, err := parseInt8("999")
+	assert.Error(t, err, "int8 should reject 999")
+
+	// "128.0" via float fallback should error for int8 (max 127)
+	_, err = parseInt8("128.0")
+	assert.Error(t, err, "int8 should reject 128.0")
+
+	// "-1" in uint8 should error
+	_, err = parseUint8("-1")
+	assert.Error(t, err, "uint8 should reject -1")
+
+	// "256.0" in uint8 should error
+	_, err = parseUint8("256.0")
+	assert.Error(t, err, "uint8 should reject 256.0")
+
+	// Valid float-formatted values within range should work
+	v, err := parseInt8("42.0")
+	assert.NoError(t, err)
+	assert.Equal(t, int8(42), v)
+
+	v, err = parseUint16("100.0")
+	assert.NoError(t, err)
+	assert.Equal(t, uint16(100), v)
 }
 
 func TestCastRowPadding(t *testing.T) {

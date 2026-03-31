@@ -653,17 +653,13 @@ func (t *TaskExecution) createIntermediateConfig() *Config {
 	intermediateConfig := *t.Config // Create a copy of the original config
 
 	// Set up the intermediate file.
-	// Default to Parquet: preserves column types (no string round-trip),
-	// built-in compression, and still auditable/recoverable.
-	// Set SLING_INTERMEDIATE_FORMAT=csv to use CSV instead.
+	// CSV is the default. Parquet is available as an experimental option
+	// via SLING_INTERMEDIATE_FORMAT=parquet (preserves types, 5x smaller),
+	// but the Parquet→DB read-back pipeline has a channel deadlock that
+	// needs to be resolved first.
 	timestamp := time.Now().Format("20060102_150405")
 	sourceTable := t.Config.Source.Stream
 	targetTable := t.Config.Target.Object
-
-	// Parquet preserves types (no string round-trip), compresses 5x smaller,
-	// and is still auditable. But the Parquet→DB read-back pipeline has a
-	// coordination issue (deadlock in channel pipeline). Default to CSV until
-	// the Parquet path is fixed. Set SLING_INTERMEDIATE_FORMAT=parquet to test.
 	format := dbio.FileTypeCsv
 	ext := "csv"
 	if strings.EqualFold(os.Getenv("SLING_INTERMEDIATE_FORMAT"), "parquet") {

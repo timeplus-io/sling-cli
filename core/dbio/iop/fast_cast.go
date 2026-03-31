@@ -1,6 +1,7 @@
 package iop
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -227,9 +228,13 @@ func parseInt8(val string) (any, error) {
 	if err == nil {
 		return int8(n), nil
 	}
+	// Float fallback for "123.0" style values; range-check to avoid silent truncation
 	f, err := strconv.ParseFloat(val, 64)
 	if err != nil {
 		return nil, err
+	}
+	if f < -128 || f > 127 {
+		return nil, fmt.Errorf("value %s overflows int8", val)
 	}
 	return int8(f), nil
 }
@@ -243,6 +248,9 @@ func parseInt16(val string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if f < -32768 || f > 32767 {
+		return nil, fmt.Errorf("value %s overflows int16", val)
+	}
 	return int16(f), nil
 }
 
@@ -254,6 +262,9 @@ func parseInt32(val string) (any, error) {
 	f, err := strconv.ParseFloat(val, 64)
 	if err != nil {
 		return nil, err
+	}
+	if f < -2147483648 || f > 2147483647 {
+		return nil, fmt.Errorf("value %s overflows int32", val)
 	}
 	return int32(f), nil
 }
@@ -279,6 +290,9 @@ func parseUint8(val string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if f < 0 || f > 255 {
+		return nil, fmt.Errorf("value %s overflows uint8", val)
+	}
 	return uint8(f), nil
 }
 
@@ -290,6 +304,9 @@ func parseUint16(val string) (any, error) {
 	f, err := strconv.ParseFloat(val, 64)
 	if err != nil {
 		return nil, err
+	}
+	if f < 0 || f > 65535 {
+		return nil, fmt.Errorf("value %s overflows uint16", val)
 	}
 	return uint16(f), nil
 }
@@ -303,6 +320,9 @@ func parseUint32(val string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if f < 0 || f > 4294967295 {
+		return nil, fmt.Errorf("value %s overflows uint32", val)
+	}
 	return uint32(f), nil
 }
 
@@ -314,6 +334,9 @@ func parseUint64(val string) (any, error) {
 	f, err := strconv.ParseFloat(val, 64)
 	if err != nil {
 		return nil, err
+	}
+	if f < 0 {
+		return nil, fmt.Errorf("value %s overflows uint64", val)
 	}
 	return uint64(f), nil
 }

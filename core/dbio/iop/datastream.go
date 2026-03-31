@@ -2094,6 +2094,7 @@ func (ds *Datastream) NewCsvReaderChnl(rowLimit int, bytesLimit int64) (readerCh
 					ds.Context.Cancel()
 					w.Flush() // flush buffered rows before closing
 					pipeW.Close()
+					mux.Unlock()
 					return
 				}
 				// Flush periodically instead of every row.
