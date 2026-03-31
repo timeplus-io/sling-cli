@@ -8,6 +8,8 @@ import (
 	"os/signal"
 	"runtime"
 	"runtime/debug"
+	"runtime/pprof"
+	"runtime/trace"
 	"strings"
 	"syscall"
 	"time"
@@ -431,6 +433,81 @@ func Track(event string, props ...map[string]interface{}) {
 
 func main() {
 
+	// Profiling cleanup — must be called before os.Exit() since defers don't run.
+	var profileCleanup []func()
+
+	// CPU profiling: set SLING_PPROF=1 or SLING_PPROF=/path/to/file.prof
+	if pprofPath := os.Getenv("SLING_PPROF"); pprofPath != "" {
+		if pprofPath == "1" || pprofPath == "true" {
+			pprofPath = "sling_cpu.prof"
+		}
+		f, err := os.Create(pprofPath)
+		if err != nil {
+			g.Warn("could not create CPU profile: %v", err)
+		} else {
+			if err := pprof.StartCPUProfile(f); err != nil {
+				g.Warn("could not start CPU profile: %v", err)
+				f.Close()
+			} else {
+				g.Info("CPU profiling enabled, writing to %s", pprofPath)
+				profileCleanup = append(profileCleanup, func() {
+					pprof.StopCPUProfile()
+					f.Close()
+					g.Info("CPU profile written to %s", pprofPath)
+				})
+			}
+		}
+	}
+
+	// Memory profiling: set SLING_MEMPROF=1 or SLING_MEMPROF=/path/to/file.prof
+	if memPath := os.Getenv("SLING_MEMPROF"); memPath != "" {
+		if memPath == "1" || memPath == "true" {
+			memPath = "sling_mem.prof"
+		}
+		profileCleanup = append(profileCleanup, func() {
+			runtime.GC()
+			f, err := os.Create(memPath)
+			if err != nil {
+				g.Warn("could not create memory profile: %v", err)
+				return
+			}
+			if err := pprof.WriteHeapProfile(f); err != nil {
+				g.Warn("could not write memory profile: %v", err)
+			}
+			f.Close()
+			g.Info("Memory profile written to %s", memPath)
+		})
+	}
+
+	// Execution trace: set SLING_TRACE=1 or SLING_TRACE=/path/to/trace.out
+	if tracePath := os.Getenv("SLING_TRACE"); tracePath != "" {
+		if tracePath == "1" || tracePath == "true" {
+			tracePath = "sling_trace.out"
+		}
+		f, err := os.Create(tracePath)
+		if err != nil {
+			g.Warn("could not create trace file: %v", err)
+		} else {
+			if err := trace.Start(f); err != nil {
+				g.Warn("could not start trace: %v", err)
+				f.Close()
+			} else {
+				g.Info("Execution trace enabled, writing to %s", tracePath)
+				profileCleanup = append(profileCleanup, func() {
+					trace.Stop()
+					f.Close()
+					g.Info("Execution trace written to %s", tracePath)
+				})
+			}
+		}
+	}
+
+	flushProfiles := func() {
+		for i := len(profileCleanup) - 1; i >= 0; i-- {
+			profileCleanup[i]()
+		}
+	}
+
 	exitCode := 11
 	done := make(chan struct{})
 	interrupt := make(chan os.Signal, 1)
@@ -442,6 +519,7 @@ func main() {
 	database.UseBulkExportFlowCSV = cast.ToBool(os.Getenv("SLING_BULK_EXPORT_FLOW_CSV"))
 
 	exit := func() {
+		flushProfiles()
 		time.Sleep(50 * time.Millisecond) // so logger can flush
 		os.Exit(exitCode)
 	}
@@ -474,6 +552,7 @@ func main() {
 	if !interrupted {
 		g.SentryFlush(time.Second * 2)
 	}
+	flushProfiles()
 	time.Sleep(50 * time.Millisecond) // so logger can flush
 
 	os.Exit(exitCode)

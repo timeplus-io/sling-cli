@@ -31,6 +31,10 @@ type Dataflow struct {
 	StreamMap       map[string]*Datastream
 	closed          bool
 	mux             sync.Mutex
+
+	// TargetCastColumns is set when a target-schema-driven fast cast
+	// should be applied. New streams pushed via StreamCh will inherit this.
+	TargetCastColumns Columns
 	SchemaVersion   int // for column type version
 }
 
@@ -591,6 +595,12 @@ func (df *Dataflow) PushStreamChan(dsCh chan *Datastream) {
 		tryPush:
 			df.mux.Lock()
 			ds.df = df
+
+			// Apply target-schema-driven fast cast to new streams
+			if len(df.TargetCastColumns) > 0 && !ds.Sp.HasTargetCastPlan() {
+				ds.Sp.SetTargetCastPlan(df.TargetCastColumns)
+			}
+
 			select {
 			case df.StreamCh <- ds:
 				df.StreamMap[ds.ID] = ds

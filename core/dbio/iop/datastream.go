@@ -864,6 +864,8 @@ loop:
 				ds.it.Row = setMetaValues(ds.it)
 				if ds.it.IsCasted || ds.it.RowIsCasted {
 					row = ds.it.Row
+				} else if ds.Sp.HasTargetCastPlan() {
+					row = ds.Sp.CastRowToTarget(ds.it.Row)
 				} else {
 					row = ds.Sp.CastRow(ds.it.Row, ds.Columns)
 				}
@@ -2093,7 +2095,12 @@ func (ds *Datastream) NewCsvReaderChnl(rowLimit int, bytesLimit int64) (readerCh
 					pipeW.Close()
 					return
 				}
-				w.Flush()
+				// Flush periodically instead of every row.
+				// csv.Writer already buffers internally; per-row Flush forces
+				// a syscall on every row, wasting ~13% of total CPU.
+				if br.Counter%10000 == 0 {
+					w.Flush()
+				}
 				mux.Unlock()
 
 				if (rowLimit > 0 && br.Counter >= rowLimit) || (bytesLimit > 0 && tbw >= bytesLimit) {

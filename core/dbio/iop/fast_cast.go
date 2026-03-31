@@ -1,0 +1,296 @@
+package iop
+
+import (
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/flarco/g"
+	"github.com/shopspring/decimal"
+	"github.com/spf13/cast"
+)
+
+// columnParser is a precompiled per-column parse function.
+// It converts a raw CSV string value to the Go type expected by the target DB.
+type columnParser func(val string) (any, error)
+
+// targetCastPlan holds precompiled parsers for schema-driven fast casting.
+// When a target table schema is known upfront, this eliminates per-cell
+// type inference, stats collection, and transform lookup.
+type targetCastPlan struct {
+	parsers      []columnParser
+	columns      Columns
+	dateLayouts  []string // fallback layouts for datetime parsing
+	layoutCaches []string // per-column datetime layout cache
+}
+
+// NewTargetCastPlan builds a cast plan from known target columns.
+// Each column gets a dedicated parser function based on its type.
+func NewTargetCastPlan(columns Columns, dateLayouts []string) *targetCastPlan {
+	plan := &targetCastPlan{
+		parsers:      make([]columnParser, len(columns)),
+		columns:      columns,
+		dateLayouts:  dateLayouts,
+		layoutCaches: make([]string, len(columns)),
+	}
+
+	for i, col := range columns {
+		plan.parsers[i] = plan.makeParser(i, col)
+	}
+
+	return plan
+}
+
+func (p *targetCastPlan) makeParser(colIdx int, col Column) columnParser {
+	// Use DbType (native DB type like "int64", "float64", "bool") when available,
+	// as this is what processBatch's classifyColumns uses.
+	// Fall back to sling's generic ColumnType for broader compatibility.
+	dbType := strings.ToLower(col.DbType)
+
+	// Strip nullable/low_cardinality wrappers
+	if strings.HasPrefix(dbType, "nullable(") {
+		dbType = strings.TrimPrefix(dbType, "nullable(")
+		dbType = strings.TrimSuffix(dbType, ")")
+	}
+	if strings.HasPrefix(dbType, "low_cardinality(") {
+		dbType = strings.TrimPrefix(dbType, "low_cardinality(")
+		dbType = strings.TrimSuffix(dbType, ")")
+	}
+
+	// Match on native DB type first (Proton types)
+	switch dbType {
+	case "bool":
+		return parseBool
+	case "int8":
+		return parseInt8
+	case "int16":
+		return parseInt16
+	case "int32":
+		return parseInt32
+	case "int64":
+		return parseInt64
+	case "uint8":
+		return parseUint8
+	case "uint16":
+		return parseUint16
+	case "uint32":
+		return parseUint32
+	case "uint64":
+		return parseUint64
+	case "float32":
+		return parseFloat32
+	case "float64":
+		return parseFloat64
+	case "string":
+		return parseIdentity
+	}
+
+	// Match on datetime patterns
+	if strings.HasPrefix(dbType, "datetime") || dbType == "date" {
+		return p.makeDatetimeParser(colIdx)
+	}
+
+	// Match on decimal patterns
+	if strings.HasPrefix(dbType, "decimal") {
+		return parseDecimal
+	}
+
+	// Fallback: use sling's generic ColumnType
+	switch {
+	case col.Type == BoolType:
+		return parseBool
+	case col.Type == SmallIntType:
+		return parseInt32
+	case col.Type == IntegerType || col.Type == BigIntType:
+		return parseInt64
+	case col.Type == FloatType || col.Type == DecimalType:
+		return parseFloat64
+	case col.Type.IsDatetime() || col.Type.IsDate():
+		return p.makeDatetimeParser(colIdx)
+	default:
+		return parseIdentity
+	}
+}
+
+// CastRow converts a row of raw values using precompiled parsers.
+// This is the fast path: no stats, no inference, no transform lookup.
+func (p *targetCastPlan) CastRow(row []any) []any {
+	for i := 0; i < len(row) && i < len(p.parsers); i++ {
+		val := row[i]
+		if val == nil {
+			continue
+		}
+
+		// Fast path: value is already a string from CSV
+		s, ok := val.(string)
+		if !ok {
+			s = cast.ToString(val)
+		}
+
+		s = strings.TrimSpace(s)
+		if s == "" || s == "NULL" {
+			row[i] = nil
+			continue
+		}
+
+		parsed, err := p.parsers[i](s)
+		if err != nil {
+			// Keep original value on parse error; processBatch will handle it
+			continue
+		}
+		row[i] = parsed
+	}
+
+	// Pad row if shorter than target schema
+	for len(row) < len(p.parsers) {
+		row = append(row, nil)
+	}
+
+	return row
+}
+
+// --- Parser functions ---
+// These are simple, allocation-minimal parse functions.
+
+func parseIdentity(val string) (any, error) {
+	return val, nil
+}
+
+func parseBool(val string) (any, error) {
+	switch val {
+	case "true", "1", "TRUE", "True", "t", "T", "yes", "YES":
+		return true, nil
+	case "false", "0", "FALSE", "False", "f", "F", "no", "NO":
+		return false, nil
+	}
+	return strconv.ParseBool(val)
+}
+
+func parseInt8(val string) (any, error) {
+	n, err := strconv.ParseInt(val, 10, 8)
+	if err == nil {
+		return int8(n), nil
+	}
+	f, err := strconv.ParseFloat(val, 64)
+	if err != nil {
+		return nil, err
+	}
+	return int8(f), nil
+}
+
+func parseInt16(val string) (any, error) {
+	n, err := strconv.ParseInt(val, 10, 16)
+	if err == nil {
+		return int16(n), nil
+	}
+	f, err := strconv.ParseFloat(val, 64)
+	if err != nil {
+		return nil, err
+	}
+	return int16(f), nil
+}
+
+func parseInt32(val string) (any, error) {
+	n, err := strconv.ParseInt(val, 10, 32)
+	if err == nil {
+		return int32(n), nil
+	}
+	f, err := strconv.ParseFloat(val, 64)
+	if err != nil {
+		return nil, err
+	}
+	return int32(f), nil
+}
+
+func parseInt64(val string) (any, error) {
+	n, err := strconv.ParseInt(val, 10, 64)
+	if err == nil {
+		return n, nil
+	}
+	f, err := strconv.ParseFloat(val, 64)
+	if err != nil {
+		return nil, err
+	}
+	return int64(f), nil
+}
+
+func parseUint8(val string) (any, error) {
+	n, err := strconv.ParseUint(val, 10, 8)
+	if err == nil {
+		return uint8(n), nil
+	}
+	return nil, err
+}
+
+func parseUint16(val string) (any, error) {
+	n, err := strconv.ParseUint(val, 10, 16)
+	if err == nil {
+		return uint16(n), nil
+	}
+	return nil, err
+}
+
+func parseUint32(val string) (any, error) {
+	n, err := strconv.ParseUint(val, 10, 32)
+	if err == nil {
+		return uint32(n), nil
+	}
+	return nil, err
+}
+
+func parseUint64(val string) (any, error) {
+	n, err := strconv.ParseUint(val, 10, 64)
+	if err == nil {
+		return n, nil
+	}
+	return nil, err
+}
+
+func parseFloat32(val string) (any, error) {
+	f, err := strconv.ParseFloat(val, 32)
+	if err != nil {
+		return nil, err
+	}
+	return float32(f), nil
+}
+
+func parseFloat64(val string) (any, error) {
+	f, err := strconv.ParseFloat(val, 64)
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+func parseDecimal(val string) (any, error) {
+	return decimal.NewFromString(val)
+}
+
+// makeDatetimeParser creates a closure with per-column layout cache.
+func (p *targetCastPlan) makeDatetimeParser(colIdx int) columnParser {
+	return func(val string) (any, error) {
+		// Try cached layout first (per-column cache)
+		if cached := p.layoutCaches[colIdx]; cached != "" {
+			t, err := time.Parse(cached, val)
+			if err == nil {
+				return t, nil
+			}
+		}
+
+		// Try all known layouts
+		for _, layout := range p.dateLayouts {
+			t, err := time.Parse(layout, val)
+			if err == nil {
+				p.layoutCaches[colIdx] = layout
+				return t, nil
+			}
+		}
+
+		// Last resort
+		t, err := cast.ToTimeE(val)
+		if err != nil {
+			return nil, g.Error(err, "cannot parse datetime: %s", val)
+		}
+		return t, nil
+	}
+}
