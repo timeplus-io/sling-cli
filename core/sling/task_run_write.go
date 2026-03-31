@@ -140,6 +140,12 @@ func (t *TaskExecution) WriteToDb(cfg *Config, df *iop.Dataflow, tgtConn databas
 		return 0, err
 	}
 
+	// Ensure Proton targets always have a fresh exec_id for idempotent inserts.
+	// This covers all write paths (runFileToDB, runDbToDb, pooled connections).
+	if tgtConn.GetType() == dbio.TypeDbProton {
+		tgtConn.SetProp("exec_id", t.ExecID)
+	}
+
 	allowDirectInsert := cast.ToBool(os.Getenv("SLING_ALLOW_DIRECT_INSERT"))
 
 	if allowDirectInsert || tgtConn.GetType() == dbio.TypeDbProton {

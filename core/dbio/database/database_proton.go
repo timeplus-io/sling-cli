@@ -358,7 +358,9 @@ func (conn *ProtonConn) BulkImportStream(tableFName string, ds *iop.Datastream) 
 	// set default schema
 	conn.Exec(g.F("use `%s`", table.Schema))
 
-	// set OnSchemaChange
+	// set OnSchemaChange — currently unreachable for Proton because
+	// adjust_column_type=true is rejected at config validation time.
+	// Kept for reference if lock-safe DDL support is added later.
 	if df := ds.Df(); df != nil && cast.ToBool(conn.GetProp("adjust_column_type")) {
 		oldOnColumnChanged := df.OnColumnChanged
 		df.OnColumnChanged = func(col iop.Column) error {
@@ -420,10 +422,22 @@ func (conn *ProtonConn) processBatch(tableFName string, table Table, batch *iop.
 		batchRows = append(batchRows, row)
 	}
 
-	idPrefix := fmt.Sprintf("%d_%d_batch_%s",
-		time.Now().UnixNano(),
-		batchCount,
-		table.FullName())
+	// Idempotent ID = exec_id + stream_url + table + batch number.
+	// - exec_id: KSUID from TaskExecution, stable across retries, unique per import
+	// - stream_url: source file path, distinguishes streams within multi-file imports
+	//   (BulkImportFlow calls BulkImportStream once per file, batchCount restarts at 1)
+	// - table + batchCount: distinguishes batches within a stream
+	//
+	// IMPORTANT: exec_id must be set via conn.SetProp("exec_id", ...) before
+	// calling BulkImportStream. Currently done in runFileToDB (task_run.go).
+	// If you add a new write path with outer retries, set exec_id there too,
+	// otherwise the fallback uses a timestamp which is NOT retry-stable.
+	execID := conn.GetProp("exec_id")
+	if execID == "" {
+		execID = fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	streamID := cast.ToString(ds.Metadata.StreamURL.Value)
+	idPrefix := fmt.Sprintf("%s_%s_%s_batch_%d", execID, streamID, table.FullName(), batchCount)
 	conn.SetIdempotent(true, idPrefix)
 
 	insertStatement := conn.GenerateInsertStatement(
@@ -439,6 +453,12 @@ func (conn *ProtonConn) processBatch(tableFName string, table Table, batch *iop.
 			return backoff.Permanent(g.Error(ds.Context.Ctx.Err(), "context cancelled"))
 		default:
 		}
+
+		// NOTE: no ds.Context.Lock() here. A batch-level lock was tested but
+		// blocks the CSV reader pipeline during Send(), causing a 5-30s
+		// regression. This is safe because adjust_column_type is rejected
+		// for Proton targets at config validation time (config.go), so
+		// no DDL can race with an in-flight batch.
 
 		batched, err := conn.ProtonConn.PrepareBatch(ds.Context.Ctx, insertStatement)
 		if err != nil {
@@ -789,7 +809,8 @@ func (conn *ProtonConn) GenerateInsertStatement(tableName string, cols iop.Colum
 	settings := ""
 	if conn.Idempotent {
 		if len(conn.IdempotentPrefix) > 0 {
-			settings = fmt.Sprintf(" settings idempotent_id='%s'", conn.IdempotentPrefix)
+			escaped := strings.ReplaceAll(conn.IdempotentPrefix, "'", "''")
+			settings = fmt.Sprintf(" settings idempotent_id='%s'", escaped)
 		} else {
 			// Use a default prefix with timestamp if not provided
 			defaultPrefix := time.Now().Format("20060102150405")
@@ -949,6 +970,9 @@ func (conn *ProtonConn) convertToArrayString(value interface{}) ([]string, error
 	if value == "" {
 		return []string{}, nil
 	}
+	if v, ok := value.([]string); ok {
+		return v, nil
+	}
 
 	str, ok := value.(string)
 	if !ok {
@@ -968,6 +992,9 @@ func (conn *ProtonConn) convertToArrayInt8(value interface{}) ([]int8, error) {
 
 	if value == "" {
 		return []int8{}, nil
+	}
+	if v, ok := value.([]int8); ok {
+		return v, nil
 	}
 
 	str, ok := value.(string)
@@ -989,6 +1016,9 @@ func (conn *ProtonConn) convertToArrayInt16(value interface{}) ([]int16, error) 
 	if value == "" {
 		return []int16{}, nil
 	}
+	if v, ok := value.([]int16); ok {
+		return v, nil
+	}
 
 	str, ok := value.(string)
 	if !ok {
@@ -1007,6 +1037,9 @@ func (conn *ProtonConn) convertToArrayInt32(value interface{}) ([]int32, error) 
 
 	if value == "" {
 		return []int32{}, nil
+	}
+	if v, ok := value.([]int32); ok {
+		return v, nil
 	}
 
 	str, ok := value.(string)
@@ -1027,6 +1060,9 @@ func (conn *ProtonConn) convertToArrayInt64(value interface{}) ([]int64, error) 
 	if value == "" {
 		return []int64{}, nil
 	}
+	if v, ok := value.([]int64); ok {
+		return v, nil
+	}
 
 	str, ok := value.(string)
 	if !ok {
@@ -1045,6 +1081,9 @@ func (conn *ProtonConn) convertToArrayUint8(value interface{}) ([]uint8, error) 
 
 	if value == "" {
 		return []uint8{}, nil
+	}
+	if v, ok := value.([]uint8); ok {
+		return v, nil
 	}
 
 	str, ok := value.(string)
@@ -1065,6 +1104,9 @@ func (conn *ProtonConn) convertToArrayUint16(value interface{}) ([]uint16, error
 	if value == "" {
 		return []uint16{}, nil
 	}
+	if v, ok := value.([]uint16); ok {
+		return v, nil
+	}
 
 	str, ok := value.(string)
 	if !ok {
@@ -1083,6 +1125,9 @@ func (conn *ProtonConn) convertToArrayUint32(value interface{}) ([]uint32, error
 
 	if value == "" {
 		return []uint32{}, nil
+	}
+	if v, ok := value.([]uint32); ok {
+		return v, nil
 	}
 
 	str, ok := value.(string)
@@ -1104,6 +1149,9 @@ func (conn *ProtonConn) convertToArrayUint64(value interface{}) ([]uint64, error
 	if value == "" {
 		return []uint64{}, nil
 	}
+	if v, ok := value.([]uint64); ok {
+		return v, nil
+	}
 
 	str, ok := value.(string)
 	if !ok {
@@ -1124,6 +1172,9 @@ func (conn *ProtonConn) convertToArrayFloat32(value interface{}) ([]float32, err
 	if value == "" {
 		return []float32{}, nil
 	}
+	if v, ok := value.([]float32); ok {
+		return v, nil
+	}
 
 	str, ok := value.(string)
 	if !ok {
@@ -1142,6 +1193,9 @@ func (conn *ProtonConn) convertToArrayFloat64(value interface{}) ([]float64, err
 
 	if value == "" {
 		return []float64{}, nil
+	}
+	if v, ok := value.([]float64); ok {
+		return v, nil
 	}
 
 	str, ok := value.(string)
@@ -1162,6 +1216,9 @@ func (conn *ProtonConn) convertToArrayBool(value interface{}) ([]bool, error) {
 
 	if value == "" {
 		return []bool{}, nil
+	}
+	if v, ok := value.([]bool); ok {
+		return v, nil
 	}
 
 	str, ok := value.(string)
@@ -1184,6 +1241,9 @@ func (conn *ProtonConn) convertToMapStringUint64(value interface{}) (map[string]
 	if value == "" {
 		return map[string]uint64{}, nil
 	}
+	if v, ok := value.(map[string]uint64); ok {
+		return v, nil
+	}
 
 	str, ok := value.(string)
 	if !ok {
@@ -1203,6 +1263,9 @@ func (conn *ProtonConn) convertToMapStringUint32(value interface{}) (map[string]
 
 	if value == "" {
 		return map[string]uint32{}, nil
+	}
+	if v, ok := value.(map[string]uint32); ok {
+		return v, nil
 	}
 
 	str, ok := value.(string)
@@ -1224,6 +1287,9 @@ func (conn *ProtonConn) convertToMapStringInt32(value interface{}) (map[string]i
 	if value == "" {
 		return map[string]int32{}, nil
 	}
+	if v, ok := value.(map[string]int32); ok {
+		return v, nil
+	}
 
 	str, ok := value.(string)
 	if !ok {
@@ -1243,6 +1309,9 @@ func (conn *ProtonConn) convertToMapStringInt64(value interface{}) (map[string]i
 
 	if value == "" {
 		return map[string]int64{}, nil
+	}
+	if v, ok := value.(map[string]int64); ok {
+		return v, nil
 	}
 
 	str, ok := value.(string)
@@ -1264,6 +1333,9 @@ func (conn *ProtonConn) convertToMapStringFloat64(value interface{}) (map[string
 	if value == "" {
 		return map[string]float64{}, nil
 	}
+	if v, ok := value.(map[string]float64); ok {
+		return v, nil
+	}
 
 	str, ok := value.(string)
 	if !ok {
@@ -1283,6 +1355,9 @@ func (conn *ProtonConn) convertToMapStringFloat32(value interface{}) (map[string
 
 	if value == "" {
 		return map[string]float32{}, nil
+	}
+	if v, ok := value.(map[string]float32); ok {
+		return v, nil
 	}
 
 	str, ok := value.(string)
@@ -1304,6 +1379,9 @@ func (conn *ProtonConn) convertToMapInt32String(value interface{}) (map[int32]st
 	if value == "" {
 		return map[int32]string{}, nil
 	}
+	if v, ok := value.(map[int32]string); ok {
+		return v, nil
+	}
 
 	str, ok := value.(string)
 	if !ok {
@@ -1323,6 +1401,9 @@ func (conn *ProtonConn) convertToMapInt64String(value interface{}) (map[int64]st
 
 	if value == "" {
 		return map[int64]string{}, nil
+	}
+	if v, ok := value.(map[int64]string); ok {
+		return v, nil
 	}
 
 	str, ok := value.(string)
@@ -1344,6 +1425,9 @@ func (conn *ProtonConn) convertToMapStringArrayString(value interface{}) (map[st
 	if value == "" {
 		return map[string][]string{}, nil
 	}
+	if v, ok := value.(map[string][]string); ok {
+		return v, nil
+	}
 
 	str, ok := value.(string)
 	if !ok {
@@ -1363,6 +1447,9 @@ func (conn *ProtonConn) convertToMapStringString(value interface{}) (map[string]
 
 	if value == "" {
 		return map[string]string{}, nil
+	}
+	if v, ok := value.(map[string]string); ok {
+		return v, nil
 	}
 
 	str, ok := value.(string)
