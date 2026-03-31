@@ -200,6 +200,14 @@ func (cfg *Config) SetDefault() {
 		if cfg.Target.Options.BatchLimit == nil {
 			cfg.Target.Options.BatchLimit = g.Int64(50000)
 		}
+		// Proton bulk insert does not hold ds.Context.Lock() during
+		// PrepareBatch/Append/Send (doing so blocks the CSV reader pipeline
+		// and causes a 5-30s regression). This means adjust_column_type DDL
+		// can race with an in-flight batch. Force it off for Proton.
+		if cfg.Target.Options.AdjustColumnType != nil && *cfg.Target.Options.AdjustColumnType {
+			g.Warn("adjust_column_type is not supported for Proton targets (concurrent DDL is unsafe without batch locking). Disabling. Please pre-create the target table with the correct schema.")
+			cfg.Target.Options.AdjustColumnType = g.Bool(false)
+		}
 	}
 
 	// set default transforms
