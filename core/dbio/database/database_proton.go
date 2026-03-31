@@ -876,24 +876,29 @@ func processProtonInsertRow(columns iop.Columns, row []any) []any {
 	return row
 }
 
-// GetCount returns count of records
+// GetCount returns the current count of records immediately, with no delay.
 func (conn *ProtonConn) GetCount(tableFName string) (uint64, error) {
-	// Add another sleep, reason: after insert table we try to getcount directly to ensure no record missing
-	// but proton seems not fully ready to get count.
+	sql := fmt.Sprintf(`select count(*) as cnt from table(%s)`, tableFName)
+	data, err := conn.Self().Query(sql)
+	if err != nil {
+		return 0, g.Error(err, "could not get count for %s", tableFName)
+	}
+	return cast.ToUint64(data.Rows[0][0]), nil
+}
+
+// GetCountPostInsert returns count after waiting for Proton write visibility.
+// Proton may not immediately reflect inserted rows, so this sleeps and retries
+// on zero. Use only for post-insert validation, never for pre-insert checks.
+func (conn *ProtonConn) GetCountPostInsert(tableFName string) (uint64, error) {
 	time.Sleep(countWaitDuration)
 	var count uint64
 
-	// Retry logic to handle occasional zero count, likely due to database latency or transactional delays.
-	// Temporary workaround while investigating the root cause.
 	for attempt := 0; attempt < maxRetries; attempt++ {
-		sql := fmt.Sprintf(`select count(*) as cnt from table(%s)`, tableFName)
-		data, err := conn.Self().Query(sql)
+		var err error
+		count, err = conn.GetCount(tableFName)
 		if err != nil {
-			g.LogError(err, "could not get row number")
 			return 0, err
 		}
-
-		count = cast.ToUint64(data.Rows[0][0])
 		if count > 0 {
 			return count, nil
 		}
@@ -905,7 +910,6 @@ func (conn *ProtonConn) GetCount(tableFName string) (uint64, error) {
 		}
 	}
 
-	// Return 0 after max retries if no valid count is obtained
 	return count, nil
 }
 

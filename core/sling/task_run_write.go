@@ -19,6 +19,16 @@ import (
 	"github.com/spf13/cast"
 )
 
+// getCountPostInsert returns count after waiting for write visibility.
+// For Proton, uses the retry-on-zero logic to handle visibility lag.
+// For other DBs, just calls GetCount directly.
+func getCountPostInsert(conn database.Connection, tableFName string) (uint64, error) {
+	if pc, ok := conn.(*database.ProtonConn); ok {
+		return pc.GetCountPostInsert(tableFName)
+	}
+	return conn.GetCount(tableFName)
+}
+
 // WriteToFile writes to a target file
 func (t *TaskExecution) WriteToFile(cfg *Config, df *iop.Dataflow) (cnt uint64, err error) {
 	var bw int64
@@ -268,8 +278,8 @@ func (t *TaskExecution) WriteToDb(cfg *Config, df *iop.Dataflow, tgtConn databas
 
 	t.PBar.Finish()
 
-	// Validate data
-	tCnt, err := tgtConn.GetCount(tableTmp.FullName())
+	// Validate data (post-insert: use retry-on-zero for Proton visibility lag)
+	tCnt, err := getCountPostInsert(tgtConn, tableTmp.FullName())
 	if err != nil {
 		err = g.Error(err, "could not get count for temp table "+tableTmp.FullName())
 		return 0, err
@@ -411,7 +421,8 @@ func (t *TaskExecution) writeDirectly(cfg *Config, df *iop.Dataflow, tgtConn dat
 			err = g.Error("final table %s not found, please create table %s first", targetTable.FullName(), targetTable.FullName())
 			return 0, err
 		}
-		// Get initial count for multi-file import validation
+		// Get initial count for multi-file import validation.
+		// Uses GetCount (immediate, no retry) — zero is valid before insert.
 		initialCount, err = tgtConn.GetCount(targetTable.FullName())
 		if err != nil {
 			err = g.Error(err, "could not get initial count from table %s", targetTable.FullName())
@@ -543,7 +554,7 @@ func (t *TaskExecution) writeDirectly(cfg *Config, df *iop.Dataflow, tgtConn dat
 	// Validate data only for full-refresh or truncate
 	// otherwise, we cannot validate the data.
 	if g.In(cfg.Mode, FullRefreshMode, TruncateMode) {
-		tCnt, err := tgtConn.GetCount(targetTable.FullName())
+		tCnt, err := getCountPostInsert(tgtConn, targetTable.FullName())
 		if err != nil {
 			err = g.Error(err, "could not get count from final table %s", targetTable.FullName())
 			return 0, err
