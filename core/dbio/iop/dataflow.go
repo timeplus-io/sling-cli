@@ -109,11 +109,11 @@ func (df *Dataflow) CleanUp() {
 // and stores the columns so new streams inherit it via PushStreamChan.
 func (df *Dataflow) ApplyTargetCastPlan(columns Columns) {
 	df.mux.Lock()
+	df.TargetCastColumns = columns
 	for _, ds := range df.Streams {
 		ds.Sp.SetTargetCastPlan(columns)
 	}
 	df.mux.Unlock()
-	df.TargetCastColumns = columns
 }
 
 // StreamConfig get the first Sp config
