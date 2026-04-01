@@ -67,6 +67,13 @@ type Datastream struct {
 	paused        bool
 	pauseChan     chan struct{}
 	unpauseChan   chan struct{}
+
+	// castPlanReady is closed when the target cast plan setup is complete
+	// (or confirmed not needed). The buffer-replay goroutine waits on this
+	// before processing rows, to avoid a race where the first rows go
+	// through the slower CastRow path (which applies max_decimals truncation).
+	castPlanReady chan struct{}
+	castPlanOnce  sync.Once
 }
 
 type schemaChg struct {
@@ -185,6 +192,7 @@ func NewDatastreamContext(ctx context.Context, columns Columns) (ds *Datastream)
 		schemaChgChan: make(chan schemaChg, 1000),
 		pauseChan:     make(chan struct{}),
 		unpauseChan:   make(chan struct{}),
+		castPlanReady: make(chan struct{}),
 	}
 	ds.Sp.ds = ds
 	ds.it = ds.NewIterator(columns, func(it *Iterator) bool { return false })
@@ -246,6 +254,12 @@ func (ds *Datastream) SetReady() {
 		ds.Ready = true
 		go func() { ds.readyChn <- struct{}{} }()
 	}
+}
+
+// SignalCastPlanReady signals that the target cast plan has been set
+// (or is confirmed not needed). Safe to call multiple times.
+func (ds *Datastream) SignalCastPlanReady() {
+	ds.castPlanOnce.Do(func() { close(ds.castPlanReady) })
 }
 
 // SetEmpty sets the ds.Rows channel as empty
@@ -340,11 +354,15 @@ func (ds *Datastream) IsClosed() bool {
 // WaitReady waits until datastream is ready
 func (ds *Datastream) WaitReady() error {
 	if ds.Ready {
+		// Signal castPlanReady for standalone consumers (e.g. Collect)
+		// that don't go through PushStreamChan/ApplyTargetCastPlan.
+		ds.SignalCastPlanReady()
 		return ds.Context.Err()
 	}
 
 	select {
 	case <-ds.readyChn:
+		ds.SignalCastPlanReady()
 		return ds.Context.Err()
 	case <-ds.Context.Ctx.Done():
 		return ds.Context.Err()
@@ -856,6 +874,36 @@ loop:
 				ds.Context.CaptureErr(g.Error(ds.it.Context.Err(), "error during iteration"))
 			}
 		}()
+
+		// Wait for target cast plan before replaying buffer rows.
+		// This prevents a race where the first buffer rows go through
+		// CastRow (which applies max_decimals truncation) instead of
+		// CastRowToTarget. We must also handle pauseChan here because
+		// the dataflow's Pause/Unpause cycle (which sets the plan)
+		// needs the goroutine to be responsive to pause signals.
+		//
+		// The loop handles Pause() retry: if Pause() fails to pause all
+		// streams atomically, it unpauses and retries. The goroutine must
+		// loop back and wait again rather than proceeding without the plan.
+		//
+		// Signaled by: ApplyTargetCastPlan, Unpause, WriteToFile,
+		//   PushStreamChan (subsequent streams), or WaitReady (standalone).
+		if ds.it.dsBufferI >= 0 && len(ds.Buffer) > 0 {
+			for {
+				select {
+				case <-ds.castPlanReady:
+					goto bufferReplayReady
+				case <-ds.pauseChan:
+					// Paused by dataflow — wait for unpause, then re-check.
+					// Pause() retry may unpause without setting the plan.
+					<-ds.unpauseChan
+					continue
+				case <-ds.Context.Ctx.Done():
+					return
+				}
+			}
+		bufferReplayReady:
+		}
 
 	loop:
 		for ds.it.next() {
