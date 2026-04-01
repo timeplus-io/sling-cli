@@ -246,6 +246,25 @@ func TestParserOverflow(t *testing.T) {
 	v, err = parseUint16("100.0")
 	assert.NoError(t, err)
 	assert.Equal(t, uint16(100), v)
+
+	// Fractional values should be rejected (not silently truncated)
+	_, err = parseInt8("42.5")
+	assert.Error(t, err, "int8 should reject fractional 42.5")
+
+	_, err = parseUint8("255.9")
+	assert.Error(t, err, "uint8 should reject fractional 255.9")
+
+	_, err = parseInt64("100.7")
+	assert.Error(t, err, "int64 should reject fractional 100.7")
+
+	// uint64 has no float fallback at all — decimal-formatted values error
+	_, err = parseUint64("42.0")
+	assert.Error(t, err, "uint64 should reject float-formatted input")
+
+	// Large uint64 values that fit in integer parse should still work
+	v, err = parseUint64("18446744073709551615")
+	assert.NoError(t, err)
+	assert.Equal(t, uint64(18446744073709551615), v)
 }
 
 func TestStreamProcessorFastCastGuard(t *testing.T) {

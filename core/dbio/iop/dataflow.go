@@ -105,6 +105,17 @@ func (df *Dataflow) CleanUp() {
 	}
 }
 
+// ApplyTargetCastPlan sets the fast cast plan on all existing streams
+// and stores the columns so new streams inherit it via PushStreamChan.
+func (df *Dataflow) ApplyTargetCastPlan(columns Columns) {
+	df.mux.Lock()
+	for _, ds := range df.Streams {
+		ds.Sp.SetTargetCastPlan(columns)
+	}
+	df.mux.Unlock()
+	df.TargetCastColumns = columns
+}
+
 // StreamConfig get the first Sp config
 func (df *Dataflow) StreamConfig() (cfg *StreamConfig) {
 	df.mux.Lock()

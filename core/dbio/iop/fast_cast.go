@@ -227,12 +227,12 @@ func parseInt8(val string) (any, error) {
 	if err == nil {
 		return int8(n), nil
 	}
-	// Float fallback for "123.0" style values; range-check to avoid silent truncation
+	// Float fallback for "123.0" style values; reject fractional and out-of-range
 	f, err := strconv.ParseFloat(val, 64)
 	if err != nil {
 		return nil, err
 	}
-	if f < -128 || f > 127 {
+	if f != math.Trunc(f) || f < -128 || f > 127 {
 		return nil, fmt.Errorf("value %s overflows int8", val)
 	}
 	return int8(f), nil
@@ -247,7 +247,7 @@ func parseInt16(val string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if f < -32768 || f > 32767 {
+	if f != math.Trunc(f) || f < -32768 || f > 32767 {
 		return nil, fmt.Errorf("value %s overflows int16", val)
 	}
 	return int16(f), nil
@@ -262,7 +262,7 @@ func parseInt32(val string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if f < -2147483648 || f > 2147483647 {
+	if f != math.Trunc(f) || f < -2147483648 || f > 2147483647 {
 		return nil, fmt.Errorf("value %s overflows int32", val)
 	}
 	return int32(f), nil
@@ -276,6 +276,9 @@ func parseInt64(val string) (any, error) {
 	f, err := strconv.ParseFloat(val, 64)
 	if err != nil {
 		return nil, err
+	}
+	if f != math.Trunc(f) {
+		return nil, fmt.Errorf("value %s is not an integer", val)
 	}
 	// Note: float64 only has 53 bits of mantissa, so values beyond ±2^53
 	// may lose precision. This matches the generic CastVal behavior.
@@ -291,7 +294,7 @@ func parseUint8(val string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if f < 0 || f > 255 {
+	if f != math.Trunc(f) || f < 0 || f > 255 {
 		return nil, fmt.Errorf("value %s overflows uint8", val)
 	}
 	return uint8(f), nil
@@ -306,7 +309,7 @@ func parseUint16(val string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if f < 0 || f > 65535 {
+	if f != math.Trunc(f) || f < 0 || f > 65535 {
 		return nil, fmt.Errorf("value %s overflows uint16", val)
 	}
 	return uint16(f), nil
@@ -321,7 +324,7 @@ func parseUint32(val string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if f < 0 || f > 4294967295 {
+	if f != math.Trunc(f) || f < 0 || f > 4294967295 {
 		return nil, fmt.Errorf("value %s overflows uint32", val)
 	}
 	return uint32(f), nil
@@ -332,16 +335,11 @@ func parseUint64(val string) (any, error) {
 	if err == nil {
 		return n, nil
 	}
-	f, err := strconv.ParseFloat(val, 64)
-	if err != nil {
-		return nil, err
-	}
-	if f < 0 || f > math.MaxUint64 {
-		return nil, fmt.Errorf("value %s overflows uint64", val)
-	}
-	// Note: float64 only has 53 bits of mantissa, so values beyond 2^53
-	// may lose precision. This matches the generic CastVal behavior.
-	return uint64(f), nil
+	// No float64 fallback for uint64: float64 has only 53-bit mantissa,
+	// so values above 2^53 silently lose precision, and values above 2^63
+	// are corrupted by the float64→uint64 conversion. Let processBatch
+	// handle non-integer formatted uint64 values.
+	return nil, err
 }
 
 func parseFloat32(val string) (any, error) {
