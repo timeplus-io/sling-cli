@@ -263,6 +263,16 @@ func TestParserOverflow(t *testing.T) {
 	v, err = parseUint64("18446744073709551615")
 	assert.NoError(t, err)
 	assert.Equal(t, uint64(18446744073709551615), v)
+
+	// Regression: max-range decimal-formatted values must not silently corrupt.
+	// 9223372036854775807.0 as float64 rounds to 9.223372036854776e+18,
+	// then int64() wraps to -9223372036854775808.
+	_, err = parseInt64("9223372036854775807.0")
+	assert.Error(t, err, "int64 should reject 9223372036854775807.0")
+
+	// 18446744073709551615.0 as float64→uint64 gives 9223372036854775808
+	_, err = parseUint64("18446744073709551615.0")
+	assert.Error(t, err, "uint64 should reject 18446744073709551615.0")
 }
 
 func TestStreamProcessorFastCastGuard(t *testing.T) {
@@ -286,6 +296,38 @@ func TestStreamProcessorFastCastGuard(t *testing.T) {
 	row := sp.CastRowToTarget([]any{"42", ""})
 	assert.Equal(t, int64(42), row[0])
 	assert.Equal(t, "", row[1]) // string col with EmptyAsNull=false → preserved
+}
+
+func TestApplyTargetCastPlanExistingStreams(t *testing.T) {
+	// Verify that ApplyTargetCastPlan sets the plan on streams
+	// that already exist in the dataflow (regression test for the case
+	// where streams are created before writeDirectly runs).
+	df := NewDataflow()
+	cols := Columns{
+		{Name: "id", Type: BigIntType, DbType: "int64"},
+		{Name: "name", Type: StringType, DbType: "string"},
+	}
+
+	// Simulate streams already pushed before fast cast is configured
+	ds1 := NewDatastream(cols)
+	ds2 := NewDatastream(cols)
+	df.Streams = append(df.Streams, ds1, ds2)
+
+	// Neither stream should have a plan yet
+	assert.False(t, ds1.Sp.HasTargetCastPlan())
+	assert.False(t, ds2.Sp.HasTargetCastPlan())
+
+	// Apply plan — should set on both existing streams and on dataflow
+	df.ApplyTargetCastPlan(cols)
+
+	assert.True(t, ds1.Sp.HasTargetCastPlan(), "existing stream 1 should get plan")
+	assert.True(t, ds2.Sp.HasTargetCastPlan(), "existing stream 2 should get plan")
+	assert.Equal(t, len(cols), len(df.TargetCastColumns), "dataflow should store columns")
+
+	// Verify the plan actually works on existing streams
+	row := ds1.Sp.CastRowToTarget([]any{"42", "hello"})
+	assert.Equal(t, int64(42), row[0])
+	assert.Equal(t, "hello", row[1])
 }
 
 func TestCastRowPadding(t *testing.T) {
