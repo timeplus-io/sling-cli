@@ -742,7 +742,6 @@ func (conn *ProtonConn) processBatch(tableFName string, table Table, batch *iop.
 				ds.Context.CaptureErr(err)
 				return backoff.Permanent(err) // Type conversion errors are permanent
 			}
-
 			// Do insert (batched is local to this closure, no concurrent access)
 			err = batched.Append(row...)
 			if err != nil {

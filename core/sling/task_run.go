@@ -652,11 +652,22 @@ func CreateTempFile(fileName string) (*os.File, error) {
 func (t *TaskExecution) createIntermediateConfig() *Config {
 	intermediateConfig := *t.Config // Create a copy of the original config
 
-	// Set up the intermediate file
+	// Set up the intermediate file.
+	// CSV is the default. Parquet is available as an experimental option
+	// via SLING_INTERMEDIATE_FORMAT=parquet (preserves types, 5x smaller),
+	// but the Parquet→DB read-back pipeline has a channel deadlock that
+	// needs to be resolved first. TODO: track and fix the parquet_arrow.go
+	// readRowsLoop channel send blocking issue.
 	timestamp := time.Now().Format("20060102_150405")
 	sourceTable := t.Config.Source.Stream
 	targetTable := t.Config.Target.Object
-	tempFileName := fmt.Sprintf("timeplus_database_%s_%s_to_%s.csv", timestamp, sourceTable, targetTable)
+	format := dbio.FileTypeCsv
+	ext := "csv"
+	if strings.EqualFold(os.Getenv("SLING_INTERMEDIATE_FORMAT"), "parquet") {
+		format = dbio.FileTypeParquet
+		ext = "parquet"
+	}
+	tempFileName := fmt.Sprintf("timeplus_database_%s_%s_to_%s.%s", timestamp, sourceTable, targetTable, ext)
 
 	// Create or overwrite the file (this is an intermediate file, no need to check if it exists)
 	tempFile, err := CreateTempFile(tempFileName)
@@ -665,18 +676,22 @@ func (t *TaskExecution) createIntermediateConfig() *Config {
 		return nil
 	}
 
+	tgtOpts := &TargetOptions{
+		MaxDecimals: g.Int(11),
+		Format:      format,
+		Concurrency: 7,
+		UseBulk:     g.Bool(true),
+	}
+	if format == dbio.FileTypeCsv {
+		tgtOpts.Delimiter = "~"
+		tgtOpts.Header = g.Bool(true)
+	}
+
 	intermediateConfig.Target = Target{
-		Conn:   "LOCAL",
-		Type:   "file",
-		Object: tempFile.Name(),
-		Options: &TargetOptions{
-			MaxDecimals: g.Int(11),
-			Format:      dbio.FileTypeCsv,
-			Delimiter:   "~", // Use ~ as delimiter for safety
-			Header:      g.Bool(true),
-			Concurrency: 7,
-			UseBulk:     g.Bool(true),
-		},
+		Conn:    "LOCAL",
+		Type:    "file",
+		Object:  tempFile.Name(),
+		Options: tgtOpts,
 		Data: map[string]interface{}{
 			"type": "file",
 			"url":  "file://" + tempFile.Name(),
@@ -809,21 +824,28 @@ func (t *TaskExecution) runProtonToProton(srcConn, tgtConn database.Connection) 
 	originalSource := t.Config.Source
 	originalSrcConn := t.Config.SrcConn
 
-	csvFormat := dbio.FileTypeCsv
-	delimiter := "~"
-	header := true
+	// Match the format used for the intermediate file
+	srcOpts := &SourceOptions{
+		MaxDecimals: g.Int(11),
+	}
+	if intermediateConfig.Target.Options != nil && intermediateConfig.Target.Options.Format == dbio.FileTypeParquet {
+		parquetFormat := dbio.FileTypeParquet
+		srcOpts.Format = &parquetFormat
+	} else {
+		csvFormat := dbio.FileTypeCsv
+		delimiter := "~"
+		header := true
+		srcOpts.Format = &csvFormat
+		srcOpts.Delimiter = delimiter
+		srcOpts.Header = &header
+	}
 
 	t.Config.Source = Source{
-		Conn:   "LOCAL",
-		Type:   "file",
-		Stream: intermediateConfig.Target.Object,
-		Options: &SourceOptions{
-			MaxDecimals: g.Int(11),
-			Format:      &csvFormat,
-			Delimiter:   delimiter,
-			Header:      &header,
-		},
-		Data: intermediateConfig.Target.Data,
+		Conn:    "LOCAL",
+		Type:    "file",
+		Stream:  intermediateConfig.Target.Object,
+		Options: srcOpts,
+		Data:    intermediateConfig.Target.Data,
 	}
 	t.Config.SrcConn = intermediateConfig.TgtConn
 

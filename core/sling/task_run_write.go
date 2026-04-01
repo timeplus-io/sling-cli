@@ -535,6 +535,52 @@ func (t *TaskExecution) writeDirectly(cfg *Config, df *iop.Dataflow, tgtConn dat
 		}
 	}
 
+	// Enable schema-driven fast cast for Proton targets.
+	// When the target table exists, we know the exact column types upfront,
+	// so we can bypass generic type inference, stats, and transform lookup.
+	// Guard: only safe when no transforms or constraints are configured,
+	// since the fast path does not apply those.
+	hasTransforms := !g.IsNil(cfg.Transforms)
+	hasConstraints := false
+	for _, col := range df.Columns {
+		if col.Constraint != nil {
+			hasConstraints = true
+			break
+		}
+	}
+	if tgtConn.GetType() == dbio.TypeDbProton && !hasTransforms && !hasConstraints {
+		tgtColumns, colErr := tgtConn.GetColumns(targetTable.FullName())
+		if colErr == nil && len(tgtColumns) > 0 {
+			// Build a mapping from target column names to their types.
+			// Match against the dataflow columns (which come from the CSV header).
+			tgtColMap := map[string]iop.Column{}
+			for _, c := range tgtColumns {
+				tgtColMap[strings.ToLower(c.Name)] = c
+			}
+
+			// Create typed columns matching dataflow order
+			typedCols := make(iop.Columns, len(df.Columns))
+			allMatched := true
+			for i, dfCol := range df.Columns {
+				if tgtCol, ok := tgtColMap[strings.ToLower(dfCol.Name)]; ok {
+					typedCols[i] = tgtCol
+					typedCols[i].Position = i + 1
+				} else {
+					// Column not in target — fall back to generic path
+					allMatched = false
+					break
+				}
+			}
+
+			if allMatched {
+				// Apply to existing streams (under lock) and set on dataflow
+				// so new streams inherit it via PushStreamChan.
+				df.ApplyTargetCastPlan(typedCols)
+				g.Debug("schema-driven fast cast enabled for %d columns", len(typedCols))
+			}
+		}
+	}
+
 	df.Unpause() // Resume dataflow
 	t.SetProgress("streaming data (direct insert)")
 

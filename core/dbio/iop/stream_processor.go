@@ -41,6 +41,32 @@ type StreamProcessor struct {
 	rowBlankValCnt   int
 	transformers     Transformers
 	digitString      map[int]string
+
+	// targetCastPlan enables schema-driven fast casting when the target
+	// table schema is known upfront (e.g., CSV→Proton with existing table).
+	// When set, CastRowToTarget bypasses CastVal entirely.
+	targetCastPlan *targetCastPlan
+}
+
+// SetTargetCastPlan enables the schema-driven fast path.
+// Call this before streaming begins when the target table already exists.
+func (sp *StreamProcessor) SetTargetCastPlan(columns Columns) {
+	sp.targetCastPlan = NewTargetCastPlan(columns, sp.dateLayouts, sp)
+	g.Debug("fast cast plan enabled for %d columns", len(columns))
+}
+
+// HasTargetCastPlan returns true if schema-driven fast path is active.
+func (sp *StreamProcessor) HasTargetCastPlan() bool {
+	return sp.targetCastPlan != nil
+}
+
+// CastRowToTarget uses precompiled per-column parsers to convert a row.
+// Only called when targetCastPlan is set (schema-driven fast path).
+func (sp *StreamProcessor) CastRowToTarget(row []any) []any {
+	sp.N++
+	row = sp.targetCastPlan.CastRow(row)
+	sp.rowBlankValCnt = sp.targetCastPlan.lastBlankCount
+	return row
 }
 
 type StreamConfig struct {
@@ -1049,23 +1075,25 @@ func (sp *StreamProcessor) ParseTime(i interface{}) (t time.Time, err error) {
 		return t, nil // return zero time, so it become nil
 	}
 
-	// date layouts to try out
-	for _, layout := range sp.dateLayouts {
-		// use cache to decrease parsing computation next iteration
-		if sp.dateLayoutCache != "" {
-			t, err = time.Parse(sp.dateLayoutCache, s)
-			if err == nil {
-				if isDate(&t) {
-					t = t.UTC() // convert to utc for dates
-				}
-				return
+	// Try cached layout first (outside loop). In practice this hits on
+	// every row after the first because column formats are consistent.
+	if sp.dateLayoutCache != "" {
+		t, err = time.Parse(sp.dateLayoutCache, s)
+		if err == nil {
+			if isDate(&t) {
+				t = t.UTC()
 			}
+			return
 		}
+	}
+
+	// Fallback: try all layouts
+	for _, layout := range sp.dateLayouts {
 		t, err = time.Parse(layout, s)
 		if err == nil {
 			sp.dateLayoutCache = layout
 			if isDate(&t) {
-				t = t.UTC() // convert to utc for dates
+				t = t.UTC()
 			}
 			return
 		}
