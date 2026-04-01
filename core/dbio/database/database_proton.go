@@ -782,7 +782,7 @@ func (conn *ProtonConn) BulkImportStreamColumnar(tableFName string, ds *iop.Data
 
 	batchCapacity := int(ds.Sp.Config.BatchLimit)
 	if batchCapacity <= 0 {
-		batchCapacity = 50000
+		batchCapacity = 30000
 	}
 	cb := newColumnarBuffer(insFields, batchCapacity)
 
