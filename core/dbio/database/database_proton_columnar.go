@@ -313,7 +313,11 @@ func (c *colBuffer) appendNonNull(val any) error {
 	// batch, not silently coerce to zero.
 	switch c.kind {
 	case colKindString:
-		c.sVals = append(c.sVals, cast.ToString(val))
+		v, err := cast.ToStringE(val)
+		if err != nil {
+			return fmt.Errorf("columnar: cannot convert %T to string: %w", val, err)
+		}
+		c.sVals = append(c.sVals, v)
 
 	case colKindBool:
 		if v, ok := val.(bool); ok {
@@ -517,7 +521,10 @@ func (c *colBuffer) appendNullable(val any) error {
 	// processBatch semantics: invalid values must fail, not silently coerce to zero.
 	switch c.kind {
 	case colKindString:
-		v := cast.ToString(val)
+		v, err := cast.ToStringE(val)
+		if err != nil {
+			return fmt.Errorf("columnar: cannot convert %T to string: %w", val, err)
+		}
 		c.spVals = append(c.spVals, &v)
 
 	case colKindBool:
