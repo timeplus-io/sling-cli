@@ -492,3 +492,62 @@ func TestColBuffer_AllIntWidths(t *testing.T) {
 		assert.NotNil(t, c.typedSlice())
 	}
 }
+
+// ─── verifyColumnOrder ─────────────────────────────────────────────────
+
+func TestVerifyColumnOrder(t *testing.T) {
+	insFields := iop.Columns{
+		{Name: "id", DbType: "int32"},
+		{Name: "name", DbType: "string"},
+		{Name: "value", DbType: "float64"},
+	}
+
+	t.Run("matching order", func(t *testing.T) {
+		batch := iop.Columns{
+			{Name: "id"}, {Name: "name"}, {Name: "value"},
+		}
+		assert.NoError(t, verifyColumnOrder(batch, insFields))
+	})
+
+	t.Run("case insensitive match", func(t *testing.T) {
+		batch := iop.Columns{
+			{Name: "ID"}, {Name: "Name"}, {Name: "VALUE"},
+		}
+		assert.NoError(t, verifyColumnOrder(batch, insFields))
+	})
+
+	t.Run("extra batch columns OK", func(t *testing.T) {
+		// Metadata columns like _loaded_at may be appended
+		batch := iop.Columns{
+			{Name: "id"}, {Name: "name"}, {Name: "value"}, {Name: "_loaded_at"},
+		}
+		assert.NoError(t, verifyColumnOrder(batch, insFields))
+	})
+
+	t.Run("wrong order detected", func(t *testing.T) {
+		batch := iop.Columns{
+			{Name: "value"}, {Name: "name"}, {Name: "id"},
+		}
+		err := verifyColumnOrder(batch, insFields)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "column order mismatch")
+	})
+
+	t.Run("swapped pair detected", func(t *testing.T) {
+		batch := iop.Columns{
+			{Name: "id"}, {Name: "value"}, {Name: "name"},
+		}
+		err := verifyColumnOrder(batch, insFields)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "position 1")
+	})
+
+	t.Run("batch too short", func(t *testing.T) {
+		batch := iop.Columns{
+			{Name: "id"}, {Name: "name"},
+		}
+		err := verifyColumnOrder(batch, insFields)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "expected at least")
+	})
+}

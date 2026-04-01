@@ -35,6 +35,10 @@ func (t *TaskExecution) WriteToFile(cfg *Config, df *iop.Dataflow) (cnt uint64, 
 	defer t.PBar.Finish()
 	setStage("5 - load-into-final")
 
+	// File targets have no Pause/Unpause cycle, so unblock
+	// buffer-replay goroutines that are waiting for the cast plan.
+	df.SignalAllCastPlanReady()
+
 	if uri := cfg.TgtConn.URL(); uri != "" {
 		dateMap := iop.GetISO8601DateMap(time.Now())
 		cfg.TgtConn.Set(g.M("url", g.Rm(uri, dateMap)))
@@ -251,7 +255,7 @@ func (t *TaskExecution) WriteToDb(cfg *Config, df *iop.Dataflow, tgtConn databas
 		return 0, err
 	}
 
-	df.Unpause() // Resume dataflow
+	df.Unpause() // Resume dataflow (also signals castPlanReady)
 	t.SetProgress("streaming data")
 
 	// Set batch limit if specified
@@ -583,7 +587,7 @@ func (t *TaskExecution) writeDirectly(cfg *Config, df *iop.Dataflow, tgtConn dat
 		}
 	}
 
-	df.Unpause() // Resume dataflow
+	df.Unpause() // Resume dataflow (also signals castPlanReady)
 	t.SetProgress("streaming data (direct insert)")
 
 	// Set batch limit if specified
