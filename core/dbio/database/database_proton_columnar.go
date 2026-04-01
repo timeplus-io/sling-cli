@@ -308,6 +308,9 @@ func (c *colBuffer) appendNonNull(val any) error {
 		return nil
 	}
 
+	// Fallback conversions use cast.ToXxxE (error-returning variants) to match
+	// processBatch semantics: invalid values like "abc" → int64 must fail the
+	// batch, not silently coerce to zero.
 	switch c.kind {
 	case colKindString:
 		c.sVals = append(c.sVals, cast.ToString(val))
@@ -316,63 +319,99 @@ func (c *colBuffer) appendNonNull(val any) error {
 		if v, ok := val.(bool); ok {
 			c.bVals = append(c.bVals, v)
 		} else {
-			c.bVals = append(c.bVals, cast.ToBool(val))
+			v, err := cast.ToBoolE(val)
+			if err != nil {
+				return fmt.Errorf("columnar: cannot convert %T to bool: %w", val, err)
+			}
+			c.bVals = append(c.bVals, v)
 		}
 
 	case colKindInt8:
 		if v, ok := val.(int8); ok {
 			c.i8Vals = append(c.i8Vals, v)
 		} else {
-			c.i8Vals = append(c.i8Vals, cast.ToInt8(val))
+			v, err := cast.ToInt8E(val)
+			if err != nil {
+				return fmt.Errorf("columnar: cannot convert %T to int8: %w", val, err)
+			}
+			c.i8Vals = append(c.i8Vals, v)
 		}
 
 	case colKindInt16:
 		if v, ok := val.(int16); ok {
 			c.i16Vals = append(c.i16Vals, v)
 		} else {
-			c.i16Vals = append(c.i16Vals, cast.ToInt16(val))
+			v, err := cast.ToInt16E(val)
+			if err != nil {
+				return fmt.Errorf("columnar: cannot convert %T to int16: %w", val, err)
+			}
+			c.i16Vals = append(c.i16Vals, v)
 		}
 
 	case colKindInt32:
 		if v, ok := val.(int32); ok {
 			c.i32Vals = append(c.i32Vals, v)
 		} else {
-			c.i32Vals = append(c.i32Vals, cast.ToInt32(val))
+			v, err := cast.ToInt32E(val)
+			if err != nil {
+				return fmt.Errorf("columnar: cannot convert %T to int32: %w", val, err)
+			}
+			c.i32Vals = append(c.i32Vals, v)
 		}
 
 	case colKindInt64:
 		if v, ok := val.(int64); ok {
 			c.i64Vals = append(c.i64Vals, v)
 		} else {
-			c.i64Vals = append(c.i64Vals, cast.ToInt64(val))
+			v, err := cast.ToInt64E(val)
+			if err != nil {
+				return fmt.Errorf("columnar: cannot convert %T to int64: %w", val, err)
+			}
+			c.i64Vals = append(c.i64Vals, v)
 		}
 
 	case colKindUint8:
 		if v, ok := val.(uint8); ok {
 			c.u8Vals = append(c.u8Vals, v)
 		} else {
-			c.u8Vals = append(c.u8Vals, cast.ToUint8(val))
+			v, err := cast.ToUint8E(val)
+			if err != nil {
+				return fmt.Errorf("columnar: cannot convert %T to uint8: %w", val, err)
+			}
+			c.u8Vals = append(c.u8Vals, v)
 		}
 
 	case colKindUint16:
 		if v, ok := val.(uint16); ok {
 			c.u16Vals = append(c.u16Vals, v)
 		} else {
-			c.u16Vals = append(c.u16Vals, cast.ToUint16(val))
+			v, err := cast.ToUint16E(val)
+			if err != nil {
+				return fmt.Errorf("columnar: cannot convert %T to uint16: %w", val, err)
+			}
+			c.u16Vals = append(c.u16Vals, v)
 		}
 
 	case colKindUint32:
 		if v, ok := val.(uint32); ok {
 			c.u32Vals = append(c.u32Vals, v)
 		} else {
-			c.u32Vals = append(c.u32Vals, cast.ToUint32(val))
+			v, err := cast.ToUint32E(val)
+			if err != nil {
+				return fmt.Errorf("columnar: cannot convert %T to uint32: %w", val, err)
+			}
+			c.u32Vals = append(c.u32Vals, v)
 		}
 
 	case colKindUint64:
 		if v, ok := val.(uint64); ok {
 			c.u64Vals = append(c.u64Vals, v)
 		} else {
-			c.u64Vals = append(c.u64Vals, cast.ToUint64(val))
+			v, err := cast.ToUint64E(val)
+			if err != nil {
+				return fmt.Errorf("columnar: cannot convert %T to uint64: %w", val, err)
+			}
+			c.u64Vals = append(c.u64Vals, v)
 		}
 
 	case colKindFloat32:
@@ -381,14 +420,22 @@ func (c *colBuffer) appendNonNull(val any) error {
 		} else if v, ok := val.(float64); ok {
 			c.f32Vals = append(c.f32Vals, float32(v))
 		} else {
-			c.f32Vals = append(c.f32Vals, cast.ToFloat32(val))
+			v, err := cast.ToFloat32E(val)
+			if err != nil {
+				return fmt.Errorf("columnar: cannot convert %T to float32: %w", val, err)
+			}
+			c.f32Vals = append(c.f32Vals, v)
 		}
 
 	case colKindFloat64:
 		if v, ok := val.(float64); ok {
 			c.f64Vals = append(c.f64Vals, v)
 		} else {
-			c.f64Vals = append(c.f64Vals, cast.ToFloat64(val))
+			v, err := cast.ToFloat64E(val)
+			if err != nil {
+				return fmt.Errorf("columnar: cannot convert %T to float64: %w", val, err)
+			}
+			c.f64Vals = append(c.f64Vals, v)
 		}
 
 	case colKindDatetime:
@@ -415,7 +462,11 @@ func (c *colBuffer) appendNonNull(val any) error {
 			}
 			c.dVals = append(c.dVals, v)
 		} else {
-			c.dVals = append(c.dVals, decimal.NewFromFloat(cast.ToFloat64(val)))
+			v, err := cast.ToFloat64E(val)
+			if err != nil {
+				return fmt.Errorf("columnar: cannot convert %T to decimal: %w", val, err)
+			}
+			c.dVals = append(c.dVals, decimal.NewFromFloat(v))
 		}
 
 	default:
@@ -462,6 +513,8 @@ func (c *colBuffer) appendNullable(val any) error {
 		return nil
 	}
 
+	// Fallback conversions use cast.ToXxxE (error-returning variants) to match
+	// processBatch semantics: invalid values must fail, not silently coerce to zero.
 	switch c.kind {
 	case colKindString:
 		v := cast.ToString(val)
@@ -471,7 +524,10 @@ func (c *colBuffer) appendNullable(val any) error {
 		if v, ok := val.(bool); ok {
 			c.bpVals = append(c.bpVals, &v)
 		} else {
-			v := cast.ToBool(val)
+			v, err := cast.ToBoolE(val)
+			if err != nil {
+				return fmt.Errorf("columnar: cannot convert %T to bool: %w", val, err)
+			}
 			c.bpVals = append(c.bpVals, &v)
 		}
 
@@ -479,7 +535,10 @@ func (c *colBuffer) appendNullable(val any) error {
 		if v, ok := val.(int8); ok {
 			c.i8pVals = append(c.i8pVals, &v)
 		} else {
-			v := cast.ToInt8(val)
+			v, err := cast.ToInt8E(val)
+			if err != nil {
+				return fmt.Errorf("columnar: cannot convert %T to int8: %w", val, err)
+			}
 			c.i8pVals = append(c.i8pVals, &v)
 		}
 
@@ -487,7 +546,10 @@ func (c *colBuffer) appendNullable(val any) error {
 		if v, ok := val.(int16); ok {
 			c.i16pVals = append(c.i16pVals, &v)
 		} else {
-			v := cast.ToInt16(val)
+			v, err := cast.ToInt16E(val)
+			if err != nil {
+				return fmt.Errorf("columnar: cannot convert %T to int16: %w", val, err)
+			}
 			c.i16pVals = append(c.i16pVals, &v)
 		}
 
@@ -495,7 +557,10 @@ func (c *colBuffer) appendNullable(val any) error {
 		if v, ok := val.(int32); ok {
 			c.i32pVals = append(c.i32pVals, &v)
 		} else {
-			v := cast.ToInt32(val)
+			v, err := cast.ToInt32E(val)
+			if err != nil {
+				return fmt.Errorf("columnar: cannot convert %T to int32: %w", val, err)
+			}
 			c.i32pVals = append(c.i32pVals, &v)
 		}
 
@@ -503,7 +568,10 @@ func (c *colBuffer) appendNullable(val any) error {
 		if v, ok := val.(int64); ok {
 			c.i64pVals = append(c.i64pVals, &v)
 		} else {
-			v := cast.ToInt64(val)
+			v, err := cast.ToInt64E(val)
+			if err != nil {
+				return fmt.Errorf("columnar: cannot convert %T to int64: %w", val, err)
+			}
 			c.i64pVals = append(c.i64pVals, &v)
 		}
 
@@ -511,7 +579,10 @@ func (c *colBuffer) appendNullable(val any) error {
 		if v, ok := val.(uint8); ok {
 			c.u8pVals = append(c.u8pVals, &v)
 		} else {
-			v := cast.ToUint8(val)
+			v, err := cast.ToUint8E(val)
+			if err != nil {
+				return fmt.Errorf("columnar: cannot convert %T to uint8: %w", val, err)
+			}
 			c.u8pVals = append(c.u8pVals, &v)
 		}
 
@@ -519,7 +590,10 @@ func (c *colBuffer) appendNullable(val any) error {
 		if v, ok := val.(uint16); ok {
 			c.u16pVals = append(c.u16pVals, &v)
 		} else {
-			v := cast.ToUint16(val)
+			v, err := cast.ToUint16E(val)
+			if err != nil {
+				return fmt.Errorf("columnar: cannot convert %T to uint16: %w", val, err)
+			}
 			c.u16pVals = append(c.u16pVals, &v)
 		}
 
@@ -527,7 +601,10 @@ func (c *colBuffer) appendNullable(val any) error {
 		if v, ok := val.(uint32); ok {
 			c.u32pVals = append(c.u32pVals, &v)
 		} else {
-			v := cast.ToUint32(val)
+			v, err := cast.ToUint32E(val)
+			if err != nil {
+				return fmt.Errorf("columnar: cannot convert %T to uint32: %w", val, err)
+			}
 			c.u32pVals = append(c.u32pVals, &v)
 		}
 
@@ -535,7 +612,10 @@ func (c *colBuffer) appendNullable(val any) error {
 		if v, ok := val.(uint64); ok {
 			c.u64pVals = append(c.u64pVals, &v)
 		} else {
-			v := cast.ToUint64(val)
+			v, err := cast.ToUint64E(val)
+			if err != nil {
+				return fmt.Errorf("columnar: cannot convert %T to uint64: %w", val, err)
+			}
 			c.u64pVals = append(c.u64pVals, &v)
 		}
 
@@ -546,7 +626,10 @@ func (c *colBuffer) appendNullable(val any) error {
 			v := float32(f64)
 			c.f32pVals = append(c.f32pVals, &v)
 		} else {
-			v := cast.ToFloat32(val)
+			v, err := cast.ToFloat32E(val)
+			if err != nil {
+				return fmt.Errorf("columnar: cannot convert %T to float32: %w", val, err)
+			}
 			c.f32pVals = append(c.f32pVals, &v)
 		}
 
@@ -554,7 +637,10 @@ func (c *colBuffer) appendNullable(val any) error {
 		if v, ok := val.(float64); ok {
 			c.f64pVals = append(c.f64pVals, &v)
 		} else {
-			v := cast.ToFloat64(val)
+			v, err := cast.ToFloat64E(val)
+			if err != nil {
+				return fmt.Errorf("columnar: cannot convert %T to float64: %w", val, err)
+			}
 			c.f64pVals = append(c.f64pVals, &v)
 		}
 
@@ -581,8 +667,12 @@ func (c *colBuffer) appendNullable(val any) error {
 			}
 			c.dpVals = append(c.dpVals, &v)
 		} else {
-			v := decimal.NewFromFloat(cast.ToFloat64(val))
-			c.dpVals = append(c.dpVals, &v)
+			v, err := cast.ToFloat64E(val)
+			if err != nil {
+				return fmt.Errorf("columnar: cannot convert %T to decimal: %w", val, err)
+			}
+			d := decimal.NewFromFloat(v)
+			c.dpVals = append(c.dpVals, &d)
 		}
 
 	default:
