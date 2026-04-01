@@ -768,6 +768,133 @@ func (conn *ProtonConn) processBatch(tableFName string, table Table, batch *iop.
 		})
 }
 
+// BulkImportStreamColumnar inserts a stream into a table using the columnar
+// driver API (batch.Column(i).Append(typedSlice)) instead of per-row Append.
+// Rows must already be typed by CastRowToTarget (fast-cast plan).
+// insFields are the pre-validated target columns (resolved by the caller).
+func (conn *ProtonConn) BulkImportStreamColumnar(tableFName string, ds *iop.Datastream, insFields iop.Columns) (count uint64, err error) {
+	table, err := ParseTableName(tableFName, conn.GetType())
+	if err != nil {
+		return 0, g.Error(err, "could not parse table name")
+	}
+
+	conn.Exec(g.F("use `%s`", table.Schema))
+
+	batchCapacity := int(ds.Sp.Config.BatchLimit)
+	if batchCapacity <= 0 {
+		batchCapacity = 30000
+	}
+	cb := newColumnarBuffer(insFields, batchCapacity)
+
+	insertStatement := conn.GenerateInsertStatement(
+		table.FullName(),
+		insFields,
+		1,
+	)
+
+	batchCount := 0
+	for batch := range ds.BatchChan {
+		batchCount++
+
+		// Drain rows into columnar buffer
+		cb.Reset()
+		for row := range batch.Rows {
+			if err = cb.AppendRow(row); err != nil {
+				return count, g.Error(err, "columnar buffer append failed at batch %d", batchCount)
+			}
+		}
+
+		if cb.size == 0 {
+			continue
+		}
+
+		// Set idempotent ID (same logic as processBatch)
+		execID := conn.GetProp("exec_id")
+		if execID == "" {
+			execID = fmt.Sprintf("%d", time.Now().UnixNano())
+		}
+		streamID := cast.ToString(ds.Metadata.StreamURL.Value)
+		idPrefix := fmt.Sprintf("%s_%s_%s_batch_%d", execID, streamID, table.FullName(), batchCount)
+		conn.SetIdempotent(true, idPrefix)
+
+		// Retry the full cycle: PrepareBatch → columnar Append → Send.
+		// The typed buffers (cb) are reused across retries without re-draining.
+		operation := func() error {
+			select {
+			case <-ds.Context.Ctx.Done():
+				return backoff.Permanent(g.Error(ds.Context.Ctx.Err(), "context cancelled"))
+			default:
+			}
+
+			batched, batchErr := conn.ProtonConn.PrepareBatch(ds.Context.Ctx, insertStatement)
+			if batchErr != nil {
+				return g.Error(batchErr, "could not prepare batch for columnar import")
+			}
+
+			for i := 0; i < cb.numCols; i++ {
+				if appendErr := batched.Column(i).Append(cb.cols[i].typedSlice()); appendErr != nil {
+					return g.Error(appendErr, "columnar append failed for column %d (%s)", i, insFields[i].Name)
+				}
+			}
+
+			if sendErr := batched.Send(); sendErr != nil {
+				return g.Error(sendErr, "could not send columnar batch")
+			}
+
+			return nil
+		}
+
+		bo := backoff.NewExponentialBackOff()
+		bo.MaxElapsedTime = 5 * time.Minute
+		bo.InitialInterval = 1 * time.Second
+		err = backoff.RetryNotify(operation,
+			bo,
+			func(retryErr error, duration time.Duration) {
+				g.Warn("Columnar batch %d failed, retrying in %v: %v", batchCount, duration, retryErr)
+			})
+		if err != nil {
+			return count, g.Error(err, "failed to process columnar batch %d", batchCount)
+		}
+
+		// Increment count only after retry succeeds — avoids double-counting
+		// if Send() succeeds but the driver returns a transient error.
+		count += uint64(cb.size)
+	}
+
+	ds.SetEmpty()
+	g.Debug("%d ROWS COPIED (columnar)", count)
+	return count, nil
+}
+
+// BulkImportFlowColumnar is the Dataflow-level entry point for the columnar fast path.
+// It iterates df.StreamCh and calls BulkImportStreamColumnar for each stream.
+// insFields are the pre-validated target columns (resolved by the caller).
+func (conn *ProtonConn) BulkImportFlowColumnar(tableFName string, df *iop.Dataflow, insFields iop.Columns) (count uint64, err error) {
+	defer df.CleanUp()
+
+	for ds := range df.StreamCh {
+		df.Context.Wg.Write.Add()
+
+		var cnt uint64
+		cnt, err = conn.BulkImportStreamColumnar(tableFName, ds, insFields)
+		count += cnt
+
+		df.Context.Wg.Write.Done()
+
+		if err != nil {
+			df.Context.CaptureErr(g.Error(err, "columnar import failed"))
+			break
+		}
+		if dsErr := ds.Err(); dsErr != nil {
+			df.Context.CaptureErr(g.Error(dsErr, "stream error during columnar import"))
+			break
+		}
+	}
+
+	df.Context.Wg.Write.Wait()
+	return count, df.Err()
+}
+
 // ExecContext runs a sql query with context, returns `error`
 func (conn *ProtonConn) ExecContext(ctx context.Context, q string, args ...interface{}) (result sql.Result, err error) {
 	err = retryWithBackoff(func() error {
