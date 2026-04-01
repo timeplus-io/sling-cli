@@ -54,10 +54,9 @@ func TestParsers(t *testing.T) {
 	v, err = parseInt64("12345")
 	assert.NoError(t, err)
 	assert.Equal(t, int64(12345), v)
-	// float-formatted int
-	v, err = parseInt64("123.0")
-	assert.NoError(t, err)
-	assert.Equal(t, int64(123), v)
+	// int64 has no float fallback — decimal-formatted values error
+	_, err = parseInt64("123.0")
+	assert.Error(t, err, "int64 should reject float-formatted input")
 
 	v, err = parseInt32("-99")
 	assert.NoError(t, err)
@@ -254,10 +253,9 @@ func TestParserOverflow(t *testing.T) {
 	_, err = parseUint8("255.9")
 	assert.Error(t, err, "uint8 should reject fractional 255.9")
 
+	// int64/uint64 have no float fallback at all — decimal-formatted values error
 	_, err = parseInt64("100.7")
-	assert.Error(t, err, "int64 should reject fractional 100.7")
-
-	// uint64 has no float fallback at all — decimal-formatted values error
+	assert.Error(t, err, "int64 should reject float-formatted input")
 	_, err = parseUint64("42.0")
 	assert.Error(t, err, "uint64 should reject float-formatted input")
 

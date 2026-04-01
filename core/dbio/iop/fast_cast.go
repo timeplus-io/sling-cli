@@ -273,16 +273,10 @@ func parseInt64(val string) (any, error) {
 	if err == nil {
 		return n, nil
 	}
-	f, err := strconv.ParseFloat(val, 64)
-	if err != nil {
-		return nil, err
-	}
-	if f != math.Trunc(f) {
-		return nil, fmt.Errorf("value %s is not an integer", val)
-	}
-	// Note: float64 only has 53 bits of mantissa, so values beyond ±2^53
-	// may lose precision. This matches the generic CastVal behavior.
-	return int64(f), nil
+	// No float64 fallback for int64: float64 has only 53-bit mantissa,
+	// so values like 9223372036854775807.0 silently corrupt to the wrong
+	// sign. Let processBatch handle non-integer formatted int64 values.
+	return nil, err
 }
 
 func parseUint8(val string) (any, error) {
