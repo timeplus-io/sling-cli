@@ -110,7 +110,7 @@ func (p *targetCastPlan) makeParser(colIdx int, col Column) columnParser {
 	}
 
 	// Match on datetime patterns
-	if strings.HasPrefix(dbType, "datetime") || dbType == "date" {
+	if strings.HasPrefix(dbType, "datetime") || dbType == "date" || dbType == "date32" {
 		return p.makeDatetimeParser(colIdx)
 	}
 
