@@ -691,11 +691,17 @@ func (c *colBuffer) appendNullable(val any) error {
 // parseTimeString is a fallback datetime parser for values that CastRowToTarget
 // didn't convert (e.g., rows buffered before the fast-cast plan was applied).
 func parseTimeString(s string) (time.Time, error) {
-	// Try common formats used by sling CSV exports
+	// Try common formats used by sling CSV exports.
+	// -07:00 handles ±HH:MM offsets, -0700 handles ±HHMM, -07 handles ±HH.
 	for _, layout := range []string{
+		"2006-01-02 15:04:05.000000 -07:00",
+		"2006-01-02 15:04:05.000000 -0700",
 		"2006-01-02 15:04:05.000000 -07",
-		"2006-01-02 15:04:05.000000 +00",
+		"2006-01-02 15:04:05.000 -07:00",
+		"2006-01-02 15:04:05.000 -0700",
 		"2006-01-02 15:04:05.000 -07",
+		"2006-01-02 15:04:05 -07:00",
+		"2006-01-02 15:04:05 -0700",
 		"2006-01-02 15:04:05 -07",
 		"2006-01-02T15:04:05.000000Z",
 		"2006-01-02T15:04:05Z",

@@ -771,7 +771,8 @@ func (conn *ProtonConn) processBatch(tableFName string, table Table, batch *iop.
 // BulkImportStreamColumnar inserts a stream into a table using the columnar
 // driver API (batch.Column(i).Append(typedSlice)) instead of per-row Append.
 // Rows must already be typed by CastRowToTarget (fast-cast plan).
-func (conn *ProtonConn) BulkImportStreamColumnar(tableFName string, ds *iop.Datastream) (count uint64, err error) {
+// insFields are the pre-validated target columns (resolved by the caller).
+func (conn *ProtonConn) BulkImportStreamColumnar(tableFName string, ds *iop.Datastream, insFields iop.Columns) (count uint64, err error) {
 	table, err := ParseTableName(tableFName, conn.GetType())
 	if err != nil {
 		return 0, g.Error(err, "could not parse table name")
@@ -779,17 +780,10 @@ func (conn *ProtonConn) BulkImportStreamColumnar(tableFName string, ds *iop.Data
 
 	conn.Exec(g.F("use `%s`", table.Schema))
 
-	// Get target columns once (schema is fixed for columnar path).
-	columns, err := conn.GetColumns(tableFName)
-	if err != nil {
-		return 0, g.Error(err, "could not get columns for %s", tableFName)
+	batchCapacity := int(ds.Sp.Config.BatchLimit)
+	if batchCapacity <= 0 {
+		batchCapacity = 50000
 	}
-	insFields, err := conn.ValidateColumnNames(columns, ds.Columns.Names(), true)
-	if err != nil {
-		return 0, g.Error(err, "columns mismatch for columnar import")
-	}
-
-	batchCapacity := 50000 // default batch_limit
 	cb := newColumnarBuffer(insFields, batchCapacity)
 
 	insertStatement := conn.GenerateInsertStatement(
@@ -871,14 +865,15 @@ func (conn *ProtonConn) BulkImportStreamColumnar(tableFName string, ds *iop.Data
 
 // BulkImportFlowColumnar is the Dataflow-level entry point for the columnar fast path.
 // It iterates df.StreamCh and calls BulkImportStreamColumnar for each stream.
-func (conn *ProtonConn) BulkImportFlowColumnar(tableFName string, df *iop.Dataflow) (count uint64, err error) {
+// insFields are the pre-validated target columns (resolved by the caller).
+func (conn *ProtonConn) BulkImportFlowColumnar(tableFName string, df *iop.Dataflow, insFields iop.Columns) (count uint64, err error) {
 	defer df.CleanUp()
 
 	for ds := range df.StreamCh {
 		df.Context.Wg.Write.Add()
 
 		var cnt uint64
-		cnt, err = conn.BulkImportStreamColumnar(tableFName, ds)
+		cnt, err = conn.BulkImportStreamColumnar(tableFName, ds, insFields)
 		count += cnt
 
 		df.Context.Wg.Write.Done()

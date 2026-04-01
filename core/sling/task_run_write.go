@@ -601,7 +601,7 @@ func (t *TaskExecution) writeDirectly(cfg *Config, df *iop.Dataflow, tgtConn dat
 			if database.CanUseColumnarFastPath(typedCols) {
 				g.Debug("columnar fast path enabled for Proton insert")
 				useColumnar = true
-				cnt, err = pc.BulkImportFlowColumnar(targetTable.FullName(), df)
+				cnt, err = pc.BulkImportFlowColumnar(targetTable.FullName(), df, typedCols)
 				if err != nil {
 					tgtConn.Rollback()
 					err = g.Error(err, "could not insert into "+targetTable.FullName())

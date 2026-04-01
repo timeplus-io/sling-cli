@@ -416,6 +416,10 @@ func TestParseTimeString(t *testing.T) {
 		{"2025-01-01 12:00:00.000000 +00", time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC).Unix()},
 		{"2025-01-01 12:00:00.000 +00", time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC).Unix()},
 		{"2025-01-01 12:00:00 +00", time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC).Unix()},
+		// Non-UTC timezone offsets (±HH:MM and ±HHMM)
+		{"2025-01-01 12:00:00.000000 +05:30", time.Date(2025, 1, 1, 6, 30, 0, 0, time.UTC).Unix()},
+		{"2025-01-01 12:00:00.000 -05:00", time.Date(2025, 1, 1, 17, 0, 0, 0, time.UTC).Unix()},
+		{"2025-01-01 12:00:00 +0800", time.Date(2025, 1, 1, 4, 0, 0, 0, time.UTC).Unix()},
 		{"2025-01-01T12:00:00Z", time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC).Unix()},
 		{"2025-01-01T12:00:00.000000Z", time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC).Unix()},
 		{"2025-01-01 12:00:00", time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC).Unix()},
