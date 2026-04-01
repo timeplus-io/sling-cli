@@ -548,6 +548,8 @@ func (t *TaskExecution) writeDirectly(cfg *Config, df *iop.Dataflow, tgtConn dat
 			break
 		}
 	}
+	allMatched := false
+	var typedCols iop.Columns
 	if tgtConn.GetType() == dbio.TypeDbProton && !hasTransforms && !hasConstraints {
 		tgtColumns, colErr := tgtConn.GetColumns(targetTable.FullName())
 		if colErr == nil && len(tgtColumns) > 0 {
@@ -559,8 +561,8 @@ func (t *TaskExecution) writeDirectly(cfg *Config, df *iop.Dataflow, tgtConn dat
 			}
 
 			// Create typed columns matching dataflow order
-			typedCols := make(iop.Columns, len(df.Columns))
-			allMatched := true
+			typedCols = make(iop.Columns, len(df.Columns))
+			allMatched = true
 			for i, dfCol := range df.Columns {
 				if tgtCol, ok := tgtColMap[strings.ToLower(dfCol.Name)]; ok {
 					typedCols[i] = tgtCol
@@ -589,12 +591,34 @@ func (t *TaskExecution) writeDirectly(cfg *Config, df *iop.Dataflow, tgtConn dat
 		df.SetBatchLimit(*batchLimit)
 	}
 
-	// Bulk import data directly into final table
-	cnt, err = tgtConn.BulkImportFlow(targetTable.FullName(), df)
-	if err != nil {
-		tgtConn.Rollback()
-		err = g.Error(err, "could not insert into "+targetTable.FullName())
-		return 0, err
+	// Use columnar fast path for Proton when eligible:
+	// - Proton target with known schema (allMatched + fast-cast enabled)
+	// - No transforms or constraints
+	// - All columns are scalar (no array/map/tuple)
+	useColumnar := false
+	if tgtConn.GetType() == dbio.TypeDbProton && allMatched && !hasTransforms && !hasConstraints {
+		if pc, ok := tgtConn.(*database.ProtonConn); ok {
+			if database.CanUseColumnarFastPath(typedCols) {
+				g.Debug("columnar fast path enabled for Proton insert")
+				useColumnar = true
+				cnt, err = pc.BulkImportFlowColumnar(targetTable.FullName(), df)
+				if err != nil {
+					tgtConn.Rollback()
+					err = g.Error(err, "could not insert into "+targetTable.FullName())
+					return 0, err
+				}
+			}
+		}
+	}
+
+	if !useColumnar {
+		// Bulk import data directly into final table (generic row path)
+		cnt, err = tgtConn.BulkImportFlow(targetTable.FullName(), df)
+		if err != nil {
+			tgtConn.Rollback()
+			err = g.Error(err, "could not insert into "+targetTable.FullName())
+			return 0, err
+		}
 	}
 
 	// Validate data only for full-refresh or truncate

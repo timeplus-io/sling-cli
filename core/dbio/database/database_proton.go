@@ -768,6 +768,132 @@ func (conn *ProtonConn) processBatch(tableFName string, table Table, batch *iop.
 		})
 }
 
+// BulkImportStreamColumnar inserts a stream into a table using the columnar
+// driver API (batch.Column(i).Append(typedSlice)) instead of per-row Append.
+// Rows must already be typed by CastRowToTarget (fast-cast plan).
+func (conn *ProtonConn) BulkImportStreamColumnar(tableFName string, ds *iop.Datastream) (count uint64, err error) {
+	table, err := ParseTableName(tableFName, conn.GetType())
+	if err != nil {
+		return 0, g.Error(err, "could not parse table name")
+	}
+
+	conn.Exec(g.F("use `%s`", table.Schema))
+
+	// Get target columns once (schema is fixed for columnar path).
+	columns, err := conn.GetColumns(tableFName)
+	if err != nil {
+		return 0, g.Error(err, "could not get columns for %s", tableFName)
+	}
+	insFields, err := conn.ValidateColumnNames(columns, ds.Columns.Names(), true)
+	if err != nil {
+		return 0, g.Error(err, "columns mismatch for columnar import")
+	}
+
+	batchCapacity := 50000 // default batch_limit
+	cb := newColumnarBuffer(insFields, batchCapacity)
+
+	insertStatement := conn.GenerateInsertStatement(
+		table.FullName(),
+		insFields,
+		1,
+	)
+
+	batchCount := 0
+	for batch := range ds.BatchChan {
+		batchCount++
+
+		// Drain rows into columnar buffer
+		cb.Reset()
+		for row := range batch.Rows {
+			if err = cb.AppendRow(row); err != nil {
+				return count, g.Error(err, "columnar buffer append failed at batch %d", batchCount)
+			}
+		}
+
+		if cb.size == 0 {
+			continue
+		}
+
+		// Set idempotent ID (same logic as processBatch)
+		execID := conn.GetProp("exec_id")
+		if execID == "" {
+			execID = fmt.Sprintf("%d", time.Now().UnixNano())
+		}
+		streamID := cast.ToString(ds.Metadata.StreamURL.Value)
+		idPrefix := fmt.Sprintf("%s_%s_%s_batch_%d", execID, streamID, table.FullName(), batchCount)
+		conn.SetIdempotent(true, idPrefix)
+
+		// Retry the full cycle: PrepareBatch → columnar Append → Send.
+		// The typed buffers (cb) are reused across retries without re-draining.
+		operation := func() error {
+			select {
+			case <-ds.Context.Ctx.Done():
+				return backoff.Permanent(g.Error(ds.Context.Ctx.Err(), "context cancelled"))
+			default:
+			}
+
+			batched, batchErr := conn.ProtonConn.PrepareBatch(ds.Context.Ctx, insertStatement)
+			if batchErr != nil {
+				return g.Error(batchErr, "could not prepare batch for columnar import")
+			}
+
+			for i := 0; i < cb.numCols; i++ {
+				if appendErr := batched.Column(i).Append(cb.cols[i].typedSlice()); appendErr != nil {
+					return g.Error(appendErr, "columnar append failed for column %d (%s)", i, insFields[i].Name)
+				}
+			}
+
+			if sendErr := batched.Send(); sendErr != nil {
+				return g.Error(sendErr, "could not send columnar batch")
+			}
+
+			count += uint64(cb.size)
+			return nil
+		}
+
+		err = backoff.RetryNotify(operation,
+			conn.retryBackoff,
+			func(retryErr error, duration time.Duration) {
+				g.Warn("Columnar batch %d failed, retrying in %v: %v", batchCount, duration, retryErr)
+			})
+		if err != nil {
+			return count, g.Error(err, "failed to process columnar batch %d", batchCount)
+		}
+	}
+
+	ds.SetEmpty()
+	g.Debug("%d ROWS COPIED (columnar)", count)
+	return count, nil
+}
+
+// BulkImportFlowColumnar is the Dataflow-level entry point for the columnar fast path.
+// It iterates df.StreamCh and calls BulkImportStreamColumnar for each stream.
+func (conn *ProtonConn) BulkImportFlowColumnar(tableFName string, df *iop.Dataflow) (count uint64, err error) {
+	defer df.CleanUp()
+
+	for ds := range df.StreamCh {
+		df.Context.Wg.Write.Add()
+
+		var cnt uint64
+		cnt, err = conn.BulkImportStreamColumnar(tableFName, ds)
+		count += cnt
+
+		df.Context.Wg.Write.Done()
+
+		if err != nil {
+			df.Context.CaptureErr(g.Error(err, "columnar import failed"))
+			break
+		}
+		if dsErr := ds.Err(); dsErr != nil {
+			df.Context.CaptureErr(g.Error(dsErr, "stream error during columnar import"))
+			break
+		}
+	}
+
+	df.Context.Wg.Write.Wait()
+	return count, df.Err()
+}
+
 // ExecContext runs a sql query with context, returns `error`
 func (conn *ProtonConn) ExecContext(ctx context.Context, q string, args ...interface{}) (result sql.Result, err error) {
 	err = retryWithBackoff(func() error {
