@@ -851,8 +851,11 @@ func (conn *ProtonConn) BulkImportStreamColumnar(tableFName string, ds *iop.Data
 			return nil
 		}
 
+		bo := backoff.NewExponentialBackOff()
+		bo.MaxElapsedTime = 5 * time.Minute
+		bo.InitialInterval = 1 * time.Second
 		err = backoff.RetryNotify(operation,
-			conn.retryBackoff,
+			bo,
 			func(retryErr error, duration time.Duration) {
 				g.Warn("Columnar batch %d failed, retrying in %v: %v", batchCount, duration, retryErr)
 			})
