@@ -841,9 +841,6 @@ func (conn *ProtonConn) BulkImportStreamColumnar(tableFName string, ds *iop.Data
 				return g.Error(sendErr, "could not send columnar batch")
 			}
 
-			// Safe inside retry: SetIdempotent ensures the server deduplicates
-			// re-sent batches, so count won't double-count on successful retry.
-			count += uint64(cb.size)
 			return nil
 		}
 
@@ -858,6 +855,10 @@ func (conn *ProtonConn) BulkImportStreamColumnar(tableFName string, ds *iop.Data
 		if err != nil {
 			return count, g.Error(err, "failed to process columnar batch %d", batchCount)
 		}
+
+		// Increment count only after retry succeeds — avoids double-counting
+		// if Send() succeeds but the driver returns a transient error.
+		count += uint64(cb.size)
 	}
 
 	ds.SetEmpty()
