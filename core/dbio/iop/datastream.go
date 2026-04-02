@@ -708,6 +708,14 @@ loop:
 		ds.Columns = ds.Columns.Coerce(ds.Sp.Config.Columns, true)
 	}
 
+	if ds.config.ShouldUseTargetCastPlan() && len(ds.Columns) > 0 && !ds.Sp.HasTargetCastPlan() {
+		planCols := ds.Columns
+		if alignedCols, ok := AlignColumnsToTarget(ds.Columns, ds.Sp.Config.Columns); ok {
+			planCols = alignedCols
+		}
+		ds.Sp.SetTargetCastPlan(planCols)
+	}
+
 	// set to have it loop process
 	ds.it.dsBufferI = 0
 

@@ -363,28 +363,8 @@ func (t *TaskExecution) runFileToDB() (err error) {
 		t.AddCleanupTaskLast(func() { tgtConn.Close() })
 	}
 
-	if t.Config.Target.Type == dbio.TypeDbProton && t.Config.Mode == IncrementalMode {
-		t.Config.Target.Object = setSchema(cast.ToString(t.Config.Target.Data["schema"]), t.Config.Target.Object)
-
-		targetTable, err := database.ParseTableName(t.Config.Target.Object, tgtConn.GetType())
-		if err != nil {
-			return g.Error(err, "could not parse target table")
-		}
-
-		existed, err := database.TableExists(tgtConn, targetTable.FullName())
-		if err != nil {
-			return g.Error(err, "could not check if final table exists in incremental mode")
-		}
-		if !existed {
-			err = g.Error("final table %s not found in incremental mode, please create table %s first", t.Config.Target.Object, t.Config.Target.Object)
-			return err
-		}
-
-		if targetTable.Columns, err = tgtConn.GetSQLColumns(targetTable); err != nil {
-			return g.Error(err, "could not get table columns, when write to timeplusd database in incremental mode, final table %s need created first", targetTable.FullName())
-		}
-
-		t.Config.Target.Columns = targetTable.Columns
+	if err = t.preloadProtonTargetColumns(tgtConn); err != nil {
+		return err
 	}
 
 	// check if table exists by getting target columns
@@ -458,6 +438,35 @@ func (t *TaskExecution) runFileToDB() (err error) {
 		err = g.Error(t.df.Err(), "error in transfer")
 	}
 	return
+}
+
+func (t *TaskExecution) preloadProtonTargetColumns(tgtConn database.Connection) error {
+	if t.Config.Target.Type != dbio.TypeDbProton {
+		return nil
+	}
+
+	t.Config.Target.Object = setSchema(cast.ToString(t.Config.Target.Data["schema"]), t.Config.Target.Object)
+
+	targetTable, err := database.ParseTableName(t.Config.Target.Object, tgtConn.GetType())
+	if err != nil {
+		return g.Error(err, "could not parse target table")
+	}
+
+	existed, err := database.TableExists(tgtConn, targetTable.FullName())
+	if err != nil {
+		return g.Error(err, "could not check if target table exists for Proton load")
+	}
+	if !existed {
+		return g.Error("final table %s not found for Proton load, please create table %s first", t.Config.Target.Object, t.Config.Target.Object)
+	}
+
+	if targetTable.Columns, err = tgtConn.GetSQLColumns(targetTable); err != nil {
+		return g.Error(err, "could not get target columns for Proton load, please create table %s first", targetTable.FullName())
+	}
+
+	t.Config.Target.Columns = targetTable.Columns
+	t.Config.Target.columns = targetTable.Columns
+	return nil
 }
 
 func (t *TaskExecution) runFileToFile() (err error) {

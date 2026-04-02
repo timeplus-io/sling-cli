@@ -796,6 +796,12 @@ func (conn *ProtonConn) BulkImportStreamColumnar(tableFName string, ds *iop.Data
 	for batch := range ds.BatchChan {
 		batchCount++
 
+		if batchCount == 1 || batch.ColumnsChanged() {
+			if err := verifyColumnOrder(batch.Columns, insFields); err != nil {
+				return count, g.Error(err, "columnar batch %d: %s", batchCount, err)
+			}
+		}
+
 		// Drain rows into columnar buffer
 		cb.Reset()
 		for row := range batch.Rows {
@@ -893,6 +899,18 @@ func (conn *ProtonConn) BulkImportFlowColumnar(tableFName string, df *iop.Datafl
 
 	df.Context.Wg.Write.Wait()
 	return count, df.Err()
+}
+
+func verifyColumnOrder(batchCols iop.Columns, insFields iop.Columns) error {
+	for i, ins := range insFields {
+		if i >= len(batchCols) {
+			return g.Error("batch has %d columns, expected at least %d", len(batchCols), len(insFields))
+		}
+		if !strings.EqualFold(batchCols[i].Name, ins.Name) {
+			return g.Error("column order mismatch at position %d: batch has %q, target expects %q", i, batchCols[i].Name, ins.Name)
+		}
+	}
+	return nil
 }
 
 // ExecContext runs a sql query with context, returns `error`

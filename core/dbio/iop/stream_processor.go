@@ -24,6 +24,8 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
+const TargetCastPlanConfigKey = "sling_target_cast_plan"
+
 // StreamProcessor processes rows and values
 type StreamProcessor struct {
 	N                uint64
@@ -93,6 +95,10 @@ type StreamConfig struct {
 	maxDecimalsFormat string                 `json:"-"`
 
 	Map map[string]string `json:"-"`
+}
+
+func (cfg *StreamConfig) ShouldUseTargetCastPlan() bool {
+	return cfg != nil && cast.ToBool(cfg.Map[TargetCastPlanConfigKey])
 }
 
 type Transformers struct {

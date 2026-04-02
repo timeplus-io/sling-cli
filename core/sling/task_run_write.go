@@ -551,35 +551,14 @@ func (t *TaskExecution) writeDirectly(cfg *Config, df *iop.Dataflow, tgtConn dat
 	allMatched := false
 	var typedCols iop.Columns
 	if tgtConn.GetType() == dbio.TypeDbProton && !hasTransforms && !hasConstraints {
-		tgtColumns, colErr := tgtConn.GetColumns(targetTable.FullName())
-		if colErr == nil && len(tgtColumns) > 0 {
-			// Build a mapping from target column names to their types.
-			// Match against the dataflow columns (which come from the CSV header).
-			tgtColMap := map[string]iop.Column{}
-			for _, c := range tgtColumns {
-				tgtColMap[strings.ToLower(c.Name)] = c
-			}
-
-			// Create typed columns matching dataflow order
-			typedCols = make(iop.Columns, len(df.Columns))
+		tgtColumns := cfg.ColumnsPrepared()
+		if len(tgtColumns) == 0 {
+			tgtColumns, _ = tgtConn.GetColumns(targetTable.FullName())
+		}
+		if alignedCols, ok := iop.AlignColumnsToTarget(df.Columns, tgtColumns); ok {
+			typedCols = alignedCols
 			allMatched = true
-			for i, dfCol := range df.Columns {
-				if tgtCol, ok := tgtColMap[strings.ToLower(dfCol.Name)]; ok {
-					typedCols[i] = tgtCol
-					typedCols[i].Position = i + 1
-				} else {
-					// Column not in target — fall back to generic path
-					allMatched = false
-					break
-				}
-			}
-
-			if allMatched {
-				// Apply to existing streams (under lock) and set on dataflow
-				// so new streams inherit it via PushStreamChan.
-				df.ApplyTargetCastPlan(typedCols)
-				g.Debug("schema-driven fast cast enabled for %d columns", len(typedCols))
-			}
+			g.Debug("schema-driven fast cast prepared for %d columns", len(typedCols))
 		}
 	}
 
