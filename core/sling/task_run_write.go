@@ -29,29 +29,6 @@ func getCountPostInsert(conn database.Connection, tableFName string) (uint64, er
 	return conn.GetCount(tableFName)
 }
 
-func alignProtonTargetColumns(streamCols iop.Columns, targetCols iop.Columns) (iop.Columns, bool) {
-	if len(streamCols) == 0 || len(targetCols) == 0 {
-		return nil, false
-	}
-
-	targetByName := make(map[string]iop.Column, len(targetCols))
-	for _, col := range targetCols {
-		targetByName[strings.ToLower(col.Name)] = col
-	}
-
-	typedCols := make(iop.Columns, len(streamCols))
-	for i, streamCol := range streamCols {
-		targetCol, ok := targetByName[strings.ToLower(streamCol.Name)]
-		if !ok {
-			return nil, false
-		}
-		targetCol.Position = i + 1
-		typedCols[i] = targetCol
-	}
-
-	return typedCols, true
-}
-
 // WriteToFile writes to a target file
 func (t *TaskExecution) WriteToFile(cfg *Config, df *iop.Dataflow) (cnt uint64, err error) {
 	var bw int64
@@ -578,7 +555,7 @@ func (t *TaskExecution) writeDirectly(cfg *Config, df *iop.Dataflow, tgtConn dat
 		if len(tgtColumns) == 0 {
 			tgtColumns, _ = tgtConn.GetColumns(targetTable.FullName())
 		}
-		if alignedCols, ok := alignProtonTargetColumns(df.Columns, tgtColumns); ok {
+		if alignedCols, ok := iop.AlignColumnsToTarget(df.Columns, tgtColumns); ok {
 			typedCols = alignedCols
 			allMatched = true
 			g.Debug("schema-driven fast cast prepared for %d columns", len(typedCols))

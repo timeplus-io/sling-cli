@@ -709,7 +709,11 @@ loop:
 	}
 
 	if ds.config.ShouldUseTargetCastPlan() && len(ds.Columns) > 0 && !ds.Sp.HasTargetCastPlan() {
-		ds.Sp.SetTargetCastPlan(ds.Columns)
+		planCols := ds.Columns
+		if alignedCols, ok := AlignColumnsToTarget(ds.Columns, ds.Sp.Config.Columns); ok {
+			planCols = alignedCols
+		}
+		ds.Sp.SetTargetCastPlan(planCols)
 	}
 
 	// set to have it loop process

@@ -352,6 +352,29 @@ func TestDatastreamStartEnablesTargetCastPlanFromConfig(t *testing.T) {
 	assert.True(t, ds.Sp.HasTargetCastPlan(), "datastream should compile the target cast plan before replay starts")
 }
 
+func TestDatastreamStartUsesConfiguredDbTypeForTargetCastPlan(t *testing.T) {
+	ds := NewDatastreamIt(context.Background(), Columns{{Name: "amount", Type: DecimalType}}, func(it *Iterator) bool {
+		return false
+	})
+	ds.Inferred = true
+
+	ds.SetConfig(map[string]string{
+		"columns": g.Marshal(Columns{
+			{Name: "amount", Type: DecimalType, DbType: "decimal(18,4)"},
+		}),
+		TargetCastPlanConfigKey: "true",
+	})
+
+	err := ds.Start()
+	assert.NoError(t, err)
+	assert.True(t, ds.Sp.HasTargetCastPlan())
+
+	row := ds.Sp.CastRowToTarget([]any{"123.4500"})
+	val, ok := row[0].(decimal.Decimal)
+	assert.True(t, ok, "decimal target columns should keep decimal parsing in the eager cast plan")
+	assert.True(t, val.Equal(decimal.RequireFromString("123.4500")))
+}
+
 func TestCastRowPadding(t *testing.T) {
 	cols := Columns{
 		{Name: "a", Type: BigIntType, DbType: "int64"},
