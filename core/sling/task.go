@@ -392,6 +392,30 @@ func (t *TaskExecution) isIncrementalWithUpdateKey() bool {
 	return t.Config.Source.HasUpdateKey() && t.Config.Mode == IncrementalMode
 }
 
+func (t *TaskExecution) shouldUseProtonSchemaFastPath() bool {
+	if t.Config == nil || t.Config.Target.Type != dbio.TypeDbProton {
+		return false
+	}
+	if t.Config.SrcConn.Type.Kind() != dbio.KindFile && !t.Config.Options.StdIn {
+		return false
+	}
+	if !g.IsNil(t.Config.Transforms) {
+		return false
+	}
+
+	columns := t.Config.ColumnsPrepared()
+	if len(columns) == 0 {
+		return false
+	}
+	for _, col := range columns {
+		if col.Constraint != nil {
+			return false
+		}
+	}
+
+	return true
+}
+
 func (t *TaskExecution) getOptionsMap() (options map[string]any) {
 	options = g.M()
 	g.Unmarshal(g.Marshal(t.Config.Source.Options), &options)
@@ -404,6 +428,9 @@ func (t *TaskExecution) getOptionsMap() (options map[string]any) {
 	if colTransforms := t.Config.TransformsPrepared(); len(colTransforms) > 0 {
 		// set as string so that StreamProcessor parses it
 		options["transforms"] = g.Marshal(colTransforms)
+	}
+	if t.shouldUseProtonSchemaFastPath() {
+		options[iop.TargetCastPlanConfigKey] = true
 	}
 	return
 }

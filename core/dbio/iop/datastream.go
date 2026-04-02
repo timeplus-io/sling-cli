@@ -708,6 +708,10 @@ loop:
 		ds.Columns = ds.Columns.Coerce(ds.Sp.Config.Columns, true)
 	}
 
+	if ds.config.ShouldUseTargetCastPlan() && len(ds.Columns) > 0 && !ds.Sp.HasTargetCastPlan() {
+		ds.Sp.SetTargetCastPlan(ds.Columns)
+	}
+
 	// set to have it loop process
 	ds.it.dsBufferI = 0
 

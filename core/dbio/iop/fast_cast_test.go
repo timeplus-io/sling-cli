@@ -1,9 +1,11 @@
 package iop
 
 import (
+	"context"
 	"testing"
 	"time"
 
+	"github.com/flarco/g"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 )
@@ -328,6 +330,26 @@ func TestApplyTargetCastPlanExistingStreams(t *testing.T) {
 	row := ds1.Sp.CastRowToTarget([]any{"42", "hello"})
 	assert.Equal(t, int64(42), row[0])
 	assert.Equal(t, "hello", row[1])
+}
+
+func TestDatastreamStartEnablesTargetCastPlanFromConfig(t *testing.T) {
+	rows := [][]any{{"42"}}
+	ds := NewDatastreamIt(context.Background(), Columns{{Name: "id"}}, func(it *Iterator) bool {
+		if int(it.Counter) >= len(rows) {
+			return false
+		}
+		it.Row = append([]any(nil), rows[int(it.Counter)]...)
+		return true
+	})
+
+	ds.SetConfig(map[string]string{
+		"columns":               g.Marshal(Columns{{Name: "id", Type: BigIntType, DbType: "int64"}}),
+		TargetCastPlanConfigKey: "true",
+	})
+
+	err := ds.Start()
+	assert.NoError(t, err)
+	assert.True(t, ds.Sp.HasTargetCastPlan(), "datastream should compile the target cast plan before replay starts")
 }
 
 func TestCastRowPadding(t *testing.T) {

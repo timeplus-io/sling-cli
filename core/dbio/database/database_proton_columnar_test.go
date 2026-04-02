@@ -14,8 +14,8 @@ import (
 
 func TestPeelWrappers(t *testing.T) {
 	tests := []struct {
-		input      string
-		wantInner  string
+		input        string
+		wantInner    string
 		wantNullable bool
 	}{
 		{"int64", "int64", false},
@@ -23,7 +23,7 @@ func TestPeelWrappers(t *testing.T) {
 		{"low_cardinality(string)", "string", false},
 		{"nullable(low_cardinality(string))", "string", true},
 		{"low_cardinality(nullable(string))", "string", true},
-		{"Nullable(Float64)", "float64", true},          // case insensitive
+		{"Nullable(Float64)", "float64", true}, // case insensitive
 		{"LOW_CARDINALITY(NULLABLE(INT32))", "int32", true},
 		{"datetime64(3, 'UTC')", "datetime64(3, 'utc')", false},
 		{"nullable(datetime64(3, 'UTC'))", "datetime64(3, 'utc')", true},
@@ -143,7 +143,7 @@ func TestColBuffer_NonNullable_String(t *testing.T) {
 	c.allocate(4)
 
 	require.NoError(t, c.appendVal("hello"))
-	require.NoError(t, c.appendVal(nil))      // → ""
+	require.NoError(t, c.appendVal(nil))       // → ""
 	require.NoError(t, c.appendVal(int64(42))) // cast.ToStringE
 
 	slice := c.typedSlice().([]string)
@@ -491,4 +491,61 @@ func TestColBuffer_AllIntWidths(t *testing.T) {
 		require.NoError(t, c.appendVal(nil)) // zero
 		assert.NotNil(t, c.typedSlice())
 	}
+}
+
+func TestVerifyColumnOrder(t *testing.T) {
+	insFields := iop.Columns{
+		{Name: "id", DbType: "int32"},
+		{Name: "name", DbType: "string"},
+		{Name: "value", DbType: "float64"},
+	}
+
+	t.Run("matching order", func(t *testing.T) {
+		batch := iop.Columns{
+			{Name: "id"},
+			{Name: "name"},
+			{Name: "value"},
+		}
+		assert.NoError(t, verifyColumnOrder(batch, insFields))
+	})
+
+	t.Run("case insensitive match", func(t *testing.T) {
+		batch := iop.Columns{
+			{Name: "ID"},
+			{Name: "Name"},
+			{Name: "VALUE"},
+		}
+		assert.NoError(t, verifyColumnOrder(batch, insFields))
+	})
+
+	t.Run("extra batch columns ok", func(t *testing.T) {
+		batch := iop.Columns{
+			{Name: "id"},
+			{Name: "name"},
+			{Name: "value"},
+			{Name: "_loaded_at"},
+		}
+		assert.NoError(t, verifyColumnOrder(batch, insFields))
+	})
+
+	t.Run("wrong order detected", func(t *testing.T) {
+		batch := iop.Columns{
+			{Name: "value"},
+			{Name: "name"},
+			{Name: "id"},
+		}
+		err := verifyColumnOrder(batch, insFields)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "column order mismatch")
+	})
+
+	t.Run("batch too short", func(t *testing.T) {
+		batch := iop.Columns{
+			{Name: "id"},
+			{Name: "name"},
+		}
+		err := verifyColumnOrder(batch, insFields)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "expected at least")
+	})
 }
