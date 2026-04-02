@@ -796,16 +796,6 @@ func (conn *ProtonConn) BulkImportStreamColumnar(tableFName string, ds *iop.Data
 	for batch := range ds.BatchChan {
 		batchCount++
 
-		// Verify batch column order matches insFields. The columnar buffer
-		// uses positional indexing (row[i] → col[i]), so a column order
-		// mismatch would silently misroute values. This can happen with
-		// multi-file imports where CSVs have different column orders.
-		if batchCount == 1 || batch.ColumnsChanged() {
-			if err := verifyColumnOrder(batch.Columns, insFields); err != nil {
-				return count, g.Error(err, "columnar batch %d: %s", batchCount, err)
-			}
-		}
-
 		// Drain rows into columnar buffer
 		cb.Reset()
 		for row := range batch.Rows {
@@ -903,23 +893,6 @@ func (conn *ProtonConn) BulkImportFlowColumnar(tableFName string, df *iop.Datafl
 
 	df.Context.Wg.Write.Wait()
 	return count, df.Err()
-}
-
-// verifyColumnOrder checks that batch columns match insFields in both
-// name and position. The columnar buffer uses positional indexing
-// (row[i] → col[i]), so any mismatch would silently corrupt data.
-func verifyColumnOrder(batchCols iop.Columns, insFields iop.Columns) error {
-	// insFields may have fewer columns than the batch if metadata columns
-	// were added (e.g. _loaded_at). Only check the insFields range.
-	for i, ins := range insFields {
-		if i >= len(batchCols) {
-			return g.Error("batch has %d columns, expected at least %d", len(batchCols), len(insFields))
-		}
-		if !strings.EqualFold(batchCols[i].Name, ins.Name) {
-			return g.Error("column order mismatch at position %d: batch has %q, target expects %q", i, batchCols[i].Name, ins.Name)
-		}
-	}
-	return nil
 }
 
 // ExecContext runs a sql query with context, returns `error`

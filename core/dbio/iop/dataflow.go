@@ -112,20 +112,8 @@ func (df *Dataflow) ApplyTargetCastPlan(columns Columns) {
 	df.TargetCastColumns = columns
 	for _, ds := range df.Streams {
 		ds.Sp.SetTargetCastPlan(columns)
-		ds.SignalCastPlanReady()
 	}
 	df.mux.Unlock()
-}
-
-// SignalAllCastPlanReady signals all existing streams that cast plan
-// setup is complete (or not applicable). Called before Unpause to
-// unblock buffer-replay goroutines that are waiting for the plan.
-func (df *Dataflow) SignalAllCastPlanReady() {
-	df.mux.Lock()
-	defer df.mux.Unlock()
-	for _, ds := range df.Streams {
-		ds.SignalCastPlanReady()
-	}
 }
 
 // StreamConfig get the first Sp config
@@ -231,11 +219,6 @@ func (df *Dataflow) Unpause(exceptDs ...string) {
 	if df.Ready {
 		for _, ds := range df.Streams {
 			if !lo.Contains(exceptDs, ds.ID) {
-				// Signal cast plan ready before unpausing. This covers all
-				// write paths (database, file, stdout) uniformly — every path
-				// calls Unpause after setup is complete. For Proton targets,
-				// ApplyTargetCastPlan already signaled — sync.Once no-ops.
-				ds.SignalCastPlanReady()
 				ds.Unpause()
 			}
 		}
@@ -586,18 +569,6 @@ func (df *Dataflow) PushStreamChan(dsCh chan *Datastream) {
 		if ds.Err() != nil {
 			df.Context.CaptureErr(ds.Err())
 			return
-		}
-
-		// Set target cast plan early, before the stream's buffer-replay
-		// goroutine processes rows. This eliminates the race where the
-		// first rows go through the slower CastRow path (which applies
-		// max_decimals truncation) instead of CastRowToTarget.
-		// Only signal castPlanReady when the plan is actually set;
-		// for the first stream, TargetCastColumns may not be available
-		// yet and the signal will come from ApplyTargetCastPlan instead.
-		if len(df.TargetCastColumns) > 0 && !ds.Sp.HasTargetCastPlan() {
-			ds.Sp.SetTargetCastPlan(df.TargetCastColumns)
-			ds.SignalCastPlanReady()
 		}
 
 		select {
