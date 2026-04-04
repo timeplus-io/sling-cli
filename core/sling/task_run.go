@@ -863,14 +863,17 @@ func (t *TaskExecution) runProtonToProton(srcConn, tgtConn database.Connection) 
 	g.Debug("proton to proton second stage: filetodb using source options: %s", g.Marshal(t.Config.Source.Options))
 	g.Debug("proton to proton second stage: filetodb using target options: %s", g.Marshal(t.Config.Target.Options))
 	err = retryWithBackoff(func() error {
-		return t.runFileToDB()
+		if err := t.runFileToDB(); err != nil {
+			return database.PermanentIfServerError(err)
+		}
+		return nil
 	})
 
 	// Restore original config
 	t.Config.Source = originalSource
 	t.Config.SrcConn = originalSrcConn
 	if err != nil {
-		err = g.Error(err, "Failed to import data to target Proton database after %d retries", maxRetries)
+		err = g.Error(err, "Failed to import data to target Proton database")
 		return
 	}
 
