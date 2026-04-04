@@ -202,6 +202,31 @@ func retryWithBackoff(operation func() error) error {
 	})
 }
 
+// isProtonPermanentError returns true when the error originated from the
+// Proton server — a deterministic rejection that will never succeed on
+// retry. The driver's proto.Exception.Error() always formats as
+// "code: NN, message: ...". g.Error() wrapping loses the concrete type
+// but preserves the string, so we match on that pattern.
+// Network-level errors (timeout, connection reset, EOF) never contain
+// this pattern and remain retryable.
+func isProtonPermanentError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "code: ") && strings.Contains(msg, ", message:")
+}
+
+// PermanentIfServerError wraps err in backoff.Permanent when it is a
+// deterministic Proton server error, stopping the retry loop immediately.
+// Transient errors (network, timeout) pass through unchanged for retry.
+func PermanentIfServerError(err error) error {
+	if err != nil && isProtonPermanentError(err) {
+		return backoff.Permanent(err)
+	}
+	return err
+}
+
 // colClassification holds pre-computed column index lists for type conversion.
 // Built once per column-change event and reused across all batches.
 type colClassification struct {
@@ -462,7 +487,7 @@ func (conn *ProtonConn) processBatch(tableFName string, table Table, batch *iop.
 
 		batched, err := conn.ProtonConn.PrepareBatch(ds.Context.Ctx, insertStatement)
 		if err != nil {
-			return g.Error(err, "could not prepare statement for table: %s, statement: %s", table.FullName(), insertStatement)
+			return PermanentIfServerError(g.Error(err, "could not prepare statement for table: %s, statement: %s", table.FullName(), insertStatement))
 		}
 
 		// Counter for successfully inserts within this batch
@@ -746,14 +771,14 @@ func (conn *ProtonConn) processBatch(tableFName string, table Table, batch *iop.
 			err = batched.Append(row...)
 			if err != nil {
 				ds.Context.CaptureErr(g.Error(err, "could not insert into table %s, row: %#v", tableFName, row))
-				return g.Error(err, "could not execute statement") // Network/temporary errors can retry
+				return PermanentIfServerError(g.Error(err, "could not execute statement"))
 			}
 			internalCount++
 		}
 
 		err = batched.Send()
 		if err != nil {
-			return g.Error(err, "could not send batch data")
+			return PermanentIfServerError(g.Error(err, "could not send batch data"))
 		}
 
 		// Update count only after successful send
@@ -834,17 +859,17 @@ func (conn *ProtonConn) BulkImportStreamColumnar(tableFName string, ds *iop.Data
 
 			batched, batchErr := conn.ProtonConn.PrepareBatch(ds.Context.Ctx, insertStatement)
 			if batchErr != nil {
-				return g.Error(batchErr, "could not prepare batch for columnar import")
+				return PermanentIfServerError(g.Error(batchErr, "could not prepare batch for columnar import"))
 			}
 
 			for i := 0; i < cb.numCols; i++ {
 				if appendErr := batched.Column(i).Append(cb.cols[i].typedSlice()); appendErr != nil {
-					return g.Error(appendErr, "columnar append failed for column %d (%s)", i, insFields[i].Name)
+					return PermanentIfServerError(g.Error(appendErr, "columnar append failed for column %d (%s)", i, insFields[i].Name))
 				}
 			}
 
 			if sendErr := batched.Send(); sendErr != nil {
-				return g.Error(sendErr, "could not send columnar batch")
+				return PermanentIfServerError(g.Error(sendErr, "could not send columnar batch"))
 			}
 
 			return nil
@@ -918,7 +943,7 @@ func (conn *ProtonConn) ExecContext(ctx context.Context, q string, args ...inter
 	err = retryWithBackoff(func() error {
 		var execErr error
 		result, execErr = conn.BaseConn.ExecContext(ctx, q, args...)
-		return execErr
+		return PermanentIfServerError(execErr)
 	})
 
 	if err != nil {
