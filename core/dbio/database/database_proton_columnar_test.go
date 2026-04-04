@@ -509,13 +509,15 @@ func TestVerifyColumnOrder(t *testing.T) {
 		assert.NoError(t, verifyColumnOrder(batch, insFields))
 	})
 
-	t.Run("case insensitive match", func(t *testing.T) {
+	t.Run("case sensitive mismatch", func(t *testing.T) {
 		batch := iop.Columns{
 			{Name: "ID"},
 			{Name: "Name"},
 			{Name: "VALUE"},
 		}
-		assert.NoError(t, verifyColumnOrder(batch, insFields))
+		err := verifyColumnOrder(batch, insFields)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "column order mismatch")
 	})
 
 	t.Run("extra batch columns ok", func(t *testing.T) {

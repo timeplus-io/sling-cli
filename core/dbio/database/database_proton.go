@@ -906,7 +906,7 @@ func verifyColumnOrder(batchCols iop.Columns, insFields iop.Columns) error {
 		if i >= len(batchCols) {
 			return g.Error("batch has %d columns, expected at least %d", len(batchCols), len(insFields))
 		}
-		if !strings.EqualFold(batchCols[i].Name, ins.Name) {
+		if batchCols[i].Name != ins.Name {
 			return g.Error("column order mismatch at position %d: batch has %q, target expects %q", i, batchCols[i].Name, ins.Name)
 		}
 	}

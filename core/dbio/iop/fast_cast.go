@@ -64,6 +64,7 @@ func NewTargetCastPlan(columns Columns, dateLayouts []string, sp *StreamProcesso
 
 // AlignColumnsToTarget reorders target columns to match the current stream
 // order while preserving target-specific metadata such as DbType.
+// Column names are matched case-sensitively (Proton is case-sensitive).
 func AlignColumnsToTarget(streamCols Columns, targetCols Columns) (Columns, bool) {
 	if len(streamCols) == 0 || len(targetCols) == 0 {
 		return nil, false
@@ -71,12 +72,12 @@ func AlignColumnsToTarget(streamCols Columns, targetCols Columns) (Columns, bool
 
 	targetByName := make(map[string]Column, len(targetCols))
 	for _, col := range targetCols {
-		targetByName[strings.ToLower(col.Name)] = col
+		targetByName[col.Name] = col
 	}
 
 	aligned := make(Columns, len(streamCols))
 	for i, streamCol := range streamCols {
-		targetCol, ok := targetByName[strings.ToLower(streamCol.Name)]
+		targetCol, ok := targetByName[streamCol.Name]
 		if !ok {
 			return nil, false
 		}
