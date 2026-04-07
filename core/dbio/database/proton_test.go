@@ -12,6 +12,7 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	"github.com/flarco/g"
 	"github.com/stretchr/testify/assert"
+	"github.com/timeplus-io/proton-go-driver/v2"
 )
 
 // TestProtonIdempotentIdEscapesSingleQuotes verifies that single quotes in
@@ -61,31 +62,52 @@ func TestProtonIdempotentIdEscapesSingleQuotes(t *testing.T) {
 	}
 }
 
-// TestPermanentServerError verifies that Proton server errors (matching
-// proto.Exception format "code: NN, message: ...") are classified as
-// permanent and wrapped with backoff.Permanent, so retry loops stop
+// TestPermanentServerError verifies that Proton server errors are classified
+// as permanent and wrapped with backoff.Permanent, so retry loops stop
 // immediately instead of retrying for 5 minutes.
+//
+// Detection is tested at three levels:
+//  1. Typed *proton.Exception (preferred)
+//  2. g.Error-wrapped typed exception (OrigErr recursion)
+//  3. String fallback matching "code: <digit>..., message:" (legacy)
 func TestPermanentServerError(t *testing.T) {
 	tests := []struct {
 		name      string
 		err       error
 		permanent bool
 	}{
+		// --- Typed *proton.Exception (level 1) ---
 		{
-			name:      "server duplicate column error",
+			name:      "typed exception: duplicate column",
+			err:       &proton.Exception{Code: 15, Message: "Column id specified more than once"},
+			permanent: true,
+		},
+		{
+			name:      "typed exception: syntax error",
+			err:       &proton.Exception{Code: 62, Message: "Syntax error"},
+			permanent: true,
+		},
+
+		// --- g.Error-wrapped typed exception (level 2) ---
+		{
+			name:      "g.Error wrapped typed exception",
+			err:       g.Error(&proton.Exception{Code: 15, Message: "Column id specified more than once"}, "batch failed"),
+			permanent: true,
+		},
+
+		// --- String fallback (level 3) ---
+		{
+			name:      "string fallback: server error format",
 			err:       fmt.Errorf("code: 15, message: Column id specified more than once"),
 			permanent: true,
 		},
 		{
-			name:      "server syntax error",
-			err:       fmt.Errorf("code: 62, message: Syntax error"),
+			name:      "g.Error wrapped string fallback",
+			err:       g.Error(fmt.Errorf("code: 62, message: Syntax error"), "batch failed"),
 			permanent: true,
 		},
-		{
-			name:      "g.Error wrapped server error",
-			err:       g.Error(fmt.Errorf("code: 15, message: Column id specified more than once"), "batch failed"),
-			permanent: true,
-		},
+
+		// --- Transient / non-server errors ---
 		{
 			name:      "nil error",
 			err:       nil,
@@ -109,6 +131,11 @@ func TestPermanentServerError(t *testing.T) {
 		{
 			name:      "plain string error",
 			err:       errors.New("something went wrong"),
+			permanent: false,
+		},
+		{
+			name:      "string with code but no digit",
+			err:       fmt.Errorf("code: abc, message: not a real server error"),
 			permanent: false,
 		},
 	}
@@ -146,7 +173,7 @@ func TestPermanentServerError(t *testing.T) {
 func TestTransientErrorRetries(t *testing.T) {
 	t.Run("permanent error stops after one attempt", func(t *testing.T) {
 		attempts := 0
-		serverErr := fmt.Errorf("code: 15, message: Column id specified more than once")
+		serverErr := &proton.Exception{Code: 15, Message: "Column id specified more than once"}
 
 		bo := backoff.NewExponentialBackOff()
 		bo.MaxElapsedTime = 5 * time.Second // generous budget — should never be used

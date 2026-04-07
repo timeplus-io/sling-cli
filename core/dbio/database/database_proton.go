@@ -204,17 +204,39 @@ func retryWithBackoff(operation func() error) error {
 
 // isProtonPermanentError returns true when the error originated from the
 // Proton server — a deterministic rejection that will never succeed on
-// retry. The driver's proto.Exception.Error() always formats as
-// "code: NN, message: ...". g.Error() wrapping loses the concrete type
-// but preserves the string, so we match on that pattern.
-// Network-level errors (timeout, connection reset, EOF) never contain
-// this pattern and remain retryable.
+// retry (e.g. duplicate columns, syntax errors).
+//
+// Detection order:
+//  1. Typed *proton.Exception (the driver's native error type)
+//  2. Recurse into *g.ErrType.OrigErr (g.Error() wrapping loses the
+//     concrete type but preserves it in OrigErr)
+//  3. Fallback: string match on "code: <digits>, message:" — the format
+//     produced by proto.Exception.Error() in proton-go-driver v2.0.x
+//
+// Network-level errors (timeout, connection reset, EOF) never match any
+// of these checks and remain retryable.
 func isProtonPermanentError(err error) bool {
 	if err == nil {
 		return false
 	}
+
+	// 1. Direct typed check
+	if _, ok := err.(*proton.Exception); ok {
+		return true
+	}
+
+	// 2. Unwrap through g.ErrType (which doesn't implement Unwrap())
+	if et, ok := err.(*g.ErrType); ok && et.OrigErr != nil {
+		return isProtonPermanentError(et.OrigErr)
+	}
+
+	// 3. Tightened string fallback: require "code: " followed by a digit
 	msg := err.Error()
-	return strings.Contains(msg, "code: ") && strings.Contains(msg, ", message:")
+	idx := strings.Index(msg, "code: ")
+	if idx >= 0 && idx+6 < len(msg) && msg[idx+6] >= '0' && msg[idx+6] <= '9' {
+		return strings.Contains(msg[idx:], ", message:")
+	}
+	return false
 }
 
 // PermanentIfServerError wraps err in backoff.Permanent when it is a
