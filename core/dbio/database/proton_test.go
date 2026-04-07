@@ -1,11 +1,18 @@
 package database
 
 import (
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/cenkalti/backoff/v4"
+	"github.com/flarco/g"
 	"github.com/stretchr/testify/assert"
+	"github.com/timeplus-io/proton-go-driver/v2"
 )
 
 // TestProtonIdempotentIdEscapesSingleQuotes verifies that single quotes in
@@ -53,4 +60,202 @@ func TestProtonIdempotentIdEscapesSingleQuotes(t *testing.T) {
 			assert.Contains(t, settings, tt.expected)
 		})
 	}
+}
+
+// TestPermanentServerError verifies that Proton server errors are classified
+// as permanent and wrapped with backoff.Permanent, so retry loops stop
+// immediately instead of retrying for 5 minutes.
+//
+// Detection is tested at three levels:
+//  1. Typed *proton.Exception (preferred)
+//  2. g.Error-wrapped typed exception (OrigErr recursion)
+//  3. String fallback matching "code: <digit>..., message:" (legacy)
+func TestPermanentServerError(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		permanent bool
+	}{
+		// --- Typed *proton.Exception (level 1) ---
+		{
+			name:      "typed exception: duplicate column",
+			err:       &proton.Exception{Code: 15, Message: "Column id specified more than once"},
+			permanent: true,
+		},
+		{
+			name:      "typed exception: syntax error",
+			err:       &proton.Exception{Code: 62, Message: "Syntax error"},
+			permanent: true,
+		},
+
+		// --- g.Error-wrapped typed exception (level 2) ---
+		{
+			name:      "g.Error wrapped typed exception",
+			err:       g.Error(&proton.Exception{Code: 15, Message: "Column id specified more than once"}, "batch failed"),
+			permanent: true,
+		},
+
+		// --- String fallback (level 3) ---
+		{
+			name:      "string fallback: server error format",
+			err:       fmt.Errorf("code: 15, message: Column id specified more than once"),
+			permanent: true,
+		},
+		{
+			name:      "g.Error wrapped string fallback",
+			err:       g.Error(fmt.Errorf("code: 62, message: Syntax error"), "batch failed"),
+			permanent: true,
+		},
+
+		// --- Transient / non-server errors ---
+		{
+			name:      "nil error",
+			err:       nil,
+			permanent: false,
+		},
+		{
+			name:      "network EOF",
+			err:       io.EOF,
+			permanent: false,
+		},
+		{
+			name:      "network timeout",
+			err:       &net.OpError{Op: "read", Err: fmt.Errorf("connection reset by peer")},
+			permanent: false,
+		},
+		{
+			name:      "generic wrapped error",
+			err:       g.Error(io.EOF, "connection lost"),
+			permanent: false,
+		},
+		{
+			name:      "plain string error",
+			err:       errors.New("something went wrong"),
+			permanent: false,
+		},
+		{
+			name:      "string with code but no digit",
+			err:       fmt.Errorf("code: abc, message: not a real server error"),
+			permanent: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Test classification
+			assert.Equal(t, tt.permanent, isProtonPermanentError(tt.err),
+				"isProtonPermanentError mismatch")
+
+			// Test wrapping
+			wrapped := PermanentIfServerError(tt.err)
+			if tt.err == nil {
+				assert.Nil(t, wrapped)
+				return
+			}
+
+			var permErr *backoff.PermanentError
+			if tt.permanent {
+				assert.True(t, errors.As(wrapped, &permErr),
+					"expected backoff.Permanent wrapper for server error")
+			} else {
+				assert.False(t, errors.As(wrapped, &permErr),
+					"transient error should NOT be wrapped as permanent")
+				assert.Equal(t, tt.err, wrapped,
+					"transient error should pass through unchanged")
+			}
+		})
+	}
+}
+
+// TestTransientErrorRetries verifies that transient errors (network, EOF)
+// are retried by the backoff helper while permanent server errors stop
+// the loop after a single attempt.
+func TestTransientErrorRetries(t *testing.T) {
+	t.Run("permanent error stops after one attempt", func(t *testing.T) {
+		attempts := 0
+		serverErr := &proton.Exception{Code: 15, Message: "Column id specified more than once"}
+
+		bo := backoff.NewExponentialBackOff()
+		bo.MaxElapsedTime = 5 * time.Second // generous budget — should never be used
+
+		err := backoff.Retry(func() error {
+			attempts++
+			return PermanentIfServerError(serverErr)
+		}, bo)
+
+		assert.Equal(t, 1, attempts, "permanent error should be attempted exactly once")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "code: 15")
+	})
+
+	t.Run("transient error retries multiple times", func(t *testing.T) {
+		attempts := 0
+		maxAttempts := 3
+
+		bo := backoff.NewExponentialBackOff()
+		bo.MaxElapsedTime = 10 * time.Second
+		bo.InitialInterval = 1 * time.Millisecond // fast for test
+
+		err := backoff.Retry(func() error {
+			attempts++
+			if attempts >= maxAttempts {
+				return nil // succeed on 3rd attempt
+			}
+			return PermanentIfServerError(io.EOF) // transient, should retry
+		}, bo)
+
+		assert.NoError(t, err)
+		assert.Equal(t, maxAttempts, attempts,
+			"transient error should retry until success")
+	})
+}
+
+// TestServerRejectionFlag verifies the closure-flag pattern used in
+// task_run.go:runProtonToProton to distinguish permanent server rejection
+// from retry-budget exhaustion. backoff.RetryNotify unwraps
+// *backoff.PermanentError before returning, so errors.As cannot detect it
+// after the fact — the flag must be set inside the closure.
+func TestServerRejectionFlag(t *testing.T) {
+	t.Run("permanent server error sets flag", func(t *testing.T) {
+		serverErr := &proton.Exception{Code: 15, Message: "Column id specified more than once"}
+
+		var serverRejection bool
+		err := retryWithBackoff(func() error {
+			wrapped := PermanentIfServerError(serverErr)
+			if wrapped != serverErr {
+				serverRejection = true
+			}
+			return wrapped
+		})
+
+		assert.True(t, serverRejection,
+			"serverRejection flag must be set for permanent server error")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "code: 15")
+
+		// Confirm backoff unwraps PermanentError — the returned error
+		// should NOT be a *backoff.PermanentError
+		var permErr *backoff.PermanentError
+		assert.False(t, errors.As(err, &permErr),
+			"backoff.RetryNotify should unwrap PermanentError before returning")
+	})
+
+	t.Run("transient exhaustion does not set flag", func(t *testing.T) {
+		bo := backoff.NewExponentialBackOff()
+		bo.MaxElapsedTime = 50 * time.Millisecond
+		bo.InitialInterval = 1 * time.Millisecond
+
+		var serverRejection bool
+		err := backoff.RetryNotify(func() error {
+			wrapped := PermanentIfServerError(io.EOF)
+			if wrapped != io.EOF {
+				serverRejection = true
+			}
+			return wrapped
+		}, bo, func(err error, d time.Duration) {})
+
+		assert.False(t, serverRejection,
+			"serverRejection flag must NOT be set for transient error")
+		assert.Error(t, err, "should fail after exhausting retry budget")
+	})
 }

@@ -862,15 +862,27 @@ func (t *TaskExecution) runProtonToProton(srcConn, tgtConn database.Connection) 
 
 	g.Debug("proton to proton second stage: filetodb using source options: %s", g.Marshal(t.Config.Source.Options))
 	g.Debug("proton to proton second stage: filetodb using target options: %s", g.Marshal(t.Config.Target.Options))
+	var serverRejection bool
 	err = retryWithBackoff(func() error {
-		return t.runFileToDB()
+		if err := t.runFileToDB(); err != nil {
+			wrapped := database.PermanentIfServerError(err)
+			if wrapped != err { // PermanentIfServerError wrapped it → server error
+				serverRejection = true
+			}
+			return wrapped
+		}
+		return nil
 	})
 
 	// Restore original config
 	t.Config.Source = originalSource
 	t.Config.SrcConn = originalSrcConn
 	if err != nil {
-		err = g.Error(err, "Failed to import data to target Proton database after %d retries", maxRetries)
+		if serverRejection {
+			err = g.Error(err, "Proton server rejected the import (permanent error, not retried)")
+		} else {
+			err = g.Error(err, "Failed to import data to target Proton database (retries exhausted)")
+		}
 		return
 	}
 
@@ -883,7 +895,8 @@ func (t *TaskExecution) runProtonToProton(srcConn, tgtConn database.Connection) 
 
 func retryWithBackoff(operation func() error) error {
 	b := backoff.NewExponentialBackOff()
-	b.MaxElapsedTime = 5 * time.Minute // Set a maximum total retry time
+	b.MaxElapsedTime = 5 * time.Minute  // Set a maximum total retry time
+	b.InitialInterval = 1 * time.Second // Align with database.retryWithBackoff
 
 	return backoff.RetryNotify(operation, b, func(err error, duration time.Duration) {
 		g.Warn("Operation failed, retrying in %v: %v", duration, err)
