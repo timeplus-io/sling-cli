@@ -2,7 +2,6 @@ package sling
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -863,9 +862,14 @@ func (t *TaskExecution) runProtonToProton(srcConn, tgtConn database.Connection) 
 
 	g.Debug("proton to proton second stage: filetodb using source options: %s", g.Marshal(t.Config.Source.Options))
 	g.Debug("proton to proton second stage: filetodb using target options: %s", g.Marshal(t.Config.Target.Options))
+	var serverRejection bool
 	err = retryWithBackoff(func() error {
 		if err := t.runFileToDB(); err != nil {
-			return database.PermanentIfServerError(err)
+			wrapped := database.PermanentIfServerError(err)
+			if wrapped != err { // PermanentIfServerError wrapped it → server error
+				serverRejection = true
+			}
+			return wrapped
 		}
 		return nil
 	})
@@ -874,9 +878,8 @@ func (t *TaskExecution) runProtonToProton(srcConn, tgtConn database.Connection) 
 	t.Config.Source = originalSource
 	t.Config.SrcConn = originalSrcConn
 	if err != nil {
-		var permErr *backoff.PermanentError
-		if errors.As(err, &permErr) {
-			err = g.Error(permErr.Unwrap(), "Proton server rejected the import (permanent error, not retried)")
+		if serverRejection {
+			err = g.Error(err, "Proton server rejected the import (permanent error, not retried)")
 		} else {
 			err = g.Error(err, "Failed to import data to target Proton database (retries exhausted)")
 		}
