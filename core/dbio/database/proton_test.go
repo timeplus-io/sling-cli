@@ -209,3 +209,53 @@ func TestTransientErrorRetries(t *testing.T) {
 			"transient error should retry until success")
 	})
 }
+
+// TestServerRejectionFlag verifies the closure-flag pattern used in
+// task_run.go:runProtonToProton to distinguish permanent server rejection
+// from retry-budget exhaustion. backoff.RetryNotify unwraps
+// *backoff.PermanentError before returning, so errors.As cannot detect it
+// after the fact — the flag must be set inside the closure.
+func TestServerRejectionFlag(t *testing.T) {
+	t.Run("permanent server error sets flag", func(t *testing.T) {
+		serverErr := &proton.Exception{Code: 15, Message: "Column id specified more than once"}
+
+		var serverRejection bool
+		err := retryWithBackoff(func() error {
+			wrapped := PermanentIfServerError(serverErr)
+			if wrapped != serverErr {
+				serverRejection = true
+			}
+			return wrapped
+		})
+
+		assert.True(t, serverRejection,
+			"serverRejection flag must be set for permanent server error")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "code: 15")
+
+		// Confirm backoff unwraps PermanentError — the returned error
+		// should NOT be a *backoff.PermanentError
+		var permErr *backoff.PermanentError
+		assert.False(t, errors.As(err, &permErr),
+			"backoff.RetryNotify should unwrap PermanentError before returning")
+	})
+
+	t.Run("transient exhaustion does not set flag", func(t *testing.T) {
+		bo := backoff.NewExponentialBackOff()
+		bo.MaxElapsedTime = 50 * time.Millisecond
+		bo.InitialInterval = 1 * time.Millisecond
+
+		var serverRejection bool
+		err := backoff.RetryNotify(func() error {
+			wrapped := PermanentIfServerError(io.EOF)
+			if wrapped != io.EOF {
+				serverRejection = true
+			}
+			return wrapped
+		}, bo, func(err error, d time.Duration) {})
+
+		assert.False(t, serverRejection,
+			"serverRejection flag must NOT be set for transient error")
+		assert.Error(t, err, "should fail after exhausting retry budget")
+	})
+}
